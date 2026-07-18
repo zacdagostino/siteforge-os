@@ -1,34 +1,39 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import {
-  BarChart3,
-  ClipboardCheck,
-  Command,
-  FileText,
-  LayoutPanelTop,
-  Menu,
-  ShieldCheck,
-  X,
-} from 'lucide-react';
-import { useState, type PropsWithChildren } from 'react';
+import { CalendarDays, Menu, ShieldCheck, UsersRound, X } from 'lucide-react';
+import { useRef, useState, type PropsWithChildren } from 'react';
 import { Button } from './ui';
 
+export type AppPage = 'today' | 'prospects';
+
 const navigation = [
-  { href: '#command', label: 'Command', icon: Command },
-  { href: '#pipeline', label: 'Pipeline', icon: LayoutPanelTop },
-  { href: '#audit', label: 'Audit', icon: ClipboardCheck },
-  { href: '#preview', label: 'Preview', icon: BarChart3 },
-  { href: '#report', label: 'Report', icon: FileText },
-  { href: '#commercial', label: 'Commercial', icon: LayoutPanelTop },
+  { page: 'today' as const, label: 'Today', icon: CalendarDays },
+  { page: 'prospects' as const, label: 'Prospects', icon: UsersRound },
 ];
 
-function Navigation({ onNavigate }: { onNavigate?: () => void }) {
+function Navigation({
+  activePage,
+  onNavigate,
+}: {
+  activePage: AppPage;
+  onNavigate?: (page: AppPage) => void;
+}) {
   return (
     <nav aria-label="Primary navigation" className="navigation-list">
-      {navigation.map(({ href, label, icon: Icon }) => (
-        <a href={href} key={href} onClick={onNavigate}>
+      {navigation.map(({ page, label, icon: Icon }) => (
+        <button
+          aria-current={activePage === page ? 'page' : undefined}
+          className={
+            activePage === page
+              ? 'navigation-list__item navigation-list__item--active'
+              : 'navigation-list__item'
+          }
+          key={page}
+          onClick={() => onNavigate?.(page)}
+          type="button"
+        >
           <Icon aria-hidden="true" size={17} />
           <span>{label}</span>
-        </a>
+        </button>
       ))}
     </nav>
   );
@@ -57,41 +62,66 @@ function Guardrail() {
   );
 }
 
-export function AppShell({ children }: PropsWithChildren) {
+export function AppShell({
+  activePage = 'today',
+  children,
+  onNavigate,
+}: PropsWithChildren<{ activePage?: AppPage; onNavigate?: (page: AppPage) => void }>) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <Brand />
-        <Navigation />
+        <Navigation activePage={activePage} onNavigate={onNavigate} />
         <Guardrail />
       </aside>
 
       <header className="mobile-header">
-        <Brand />
         <Dialog.Root onOpenChange={setMenuOpen} open={menuOpen}>
           <Dialog.Trigger asChild>
-            <Button aria-label="Open navigation menu" size="compact" variant="quiet">
+            <Button
+              aria-label="Open navigation menu"
+              className="mobile-menu-trigger"
+              ref={menuTriggerRef}
+              size="compact"
+              variant="quiet"
+            >
               <Menu aria-hidden="true" size={20} />
             </Button>
           </Dialog.Trigger>
           <Dialog.Portal>
             <Dialog.Overlay className="navigation-overlay" />
-            <Dialog.Content aria-describedby={undefined} className="navigation-drawer">
+            <Dialog.Content
+              aria-describedby={undefined}
+              className="navigation-drawer"
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                menuTriggerRef.current?.focus();
+              }}
+            >
+              <Dialog.Title className="sr-only">Navigation</Dialog.Title>
               <div className="drawer-header">
-                <Dialog.Title>Navigation</Dialog.Title>
+                <Brand />
                 <Dialog.Close asChild>
                   <Button aria-label="Close navigation menu" size="compact" variant="quiet">
                     <X aria-hidden="true" size={20} />
                   </Button>
                 </Dialog.Close>
               </div>
-              <Navigation onNavigate={() => setMenuOpen(false)} />
+              <Navigation
+                activePage={activePage}
+                onNavigate={(page) => {
+                  onNavigate?.(page);
+                  setMenuOpen(false);
+                }}
+              />
               <Guardrail />
             </Dialog.Content>
           </Dialog.Portal>
         </Dialog.Root>
+        <Brand />
       </header>
 
       <main>{children}</main>

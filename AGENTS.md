@@ -23,6 +23,17 @@ Every user-facing change must be designed and verified at these viewport sizes:
 - Start mobile-first. Content must reflow instead of being merely scaled down; horizontal scrolling is allowed only for intentionally scrollable content such as a data table.
 - Touch targets must be at least 44 x 44 CSS pixels unless a denser, clearly justified control group is required.
 
+## Mobile navigation contract
+
+- At mobile breakpoints, the menu trigger must appear at the leading edge of the header unless the product's established navigation pattern explicitly requires otherwise.
+- Treat an opened mobile menu as a dialog or disclosure with a deliberate, single-column navigation layout. Do not allow desktop or tablet navigation grids to leak into the mobile drawer.
+- A mobile drawer must have a clear close control, an accessible name, a readable maximum width that leaves page context visible, and secondary content that does not compete with primary routes.
+- Support mouse, touch, and keyboard interaction: the trigger communicates its expanded state, Escape and the close control dismiss the drawer, focus moves into it when opened, and returns to the trigger when dismissed. A route selection also closes the drawer.
+- Scope drawer styles to the drawer component. Shared navigation styles may provide base appearance, but breakpoint-specific layout rules must be explicitly overridden where the navigation is rendered in a different context.
+- Use only restrained open/close motion and disable it for `prefers-reduced-motion`.
+- For every mobile-navigation change, verify both closed and open states at 320 x 568 and 375 x 812, plus the required tablet and desktop viewports. Check no overflow, clipped controls, obscured content, or excessive unused drawer space.
+- Add or update automated coverage for trigger position, drawer width, vertical route stacking, link dismissal, Escape dismissal, focus restoration, and visual snapshots for the closed and open states.
+
 ## Layout and spacing
 
 - Build page structure with named layout primitives: page shell, content container, stack, cluster, sidebar, and grid. Do not use one-off margin chains to create layout.
@@ -53,6 +64,7 @@ Every user-facing change must be designed and verified at these viewport sizes:
 - Use buttons for actions and links for navigation. Destructive actions require clear confirmation when the action cannot be undone.
 - Ensure asynchronous actions prevent accidental duplicate submissions and announce meaningful status changes to assistive technology.
 - Use realistic long labels, empty values, error copy, and large data sets when reviewing layouts. Do not validate only against ideal placeholder content.
+- For text sourced from prospects or websites, test both natural-language labels and unbroken values such as long domains. At 320px, 375px, tablet, and desktop, names, URLs, task text, toast copy, and headings must wrap or truncate deliberately without creating horizontal page overflow.
 
 ## Accessibility
 

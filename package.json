@@ -16,10 +16,13 @@
     "test:e2e": "playwright test",
     "test:a11y": "playwright test tests/e2e/accessibility.spec.js",
     "test:ui": "playwright test tests/e2e/responsive.spec.js",
+    "worker:capture": "node worker/capture-worker.mjs",
+    "test:worker": "node --test tests/worker/*.test.mjs",
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test:e2e"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.19",
+    "@supabase/supabase-js": "^2.110.7",
     "@vitejs/plugin-react": "^6.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
