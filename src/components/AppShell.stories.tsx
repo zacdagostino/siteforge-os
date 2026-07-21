@@ -15,7 +15,7 @@ type Story = StoryObj<typeof meta>;
 
 export const NavigationResponsive: Story = {
   render: () => (
-    <AppShell>
+    <AppShell onSignOut={async () => undefined} userEmail="alex@siteforge.studio">
       <Card className="storybook-shell-content">
         <Eyebrow>Work surface</Eyebrow>
         <h1>Responsive navigation shell</h1>

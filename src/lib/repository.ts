@@ -1,6 +1,14 @@
 import type {
   Activity,
+  AssetAnnotation,
+  AssetAnalysisJob,
+  AssetRefreshJob,
+  BrandKit,
   Audit,
+  AuditFinding,
+  BuildManifest,
+  BuilderPreviewMode,
+  BuilderRun,
   CapturedPage,
   Business,
   Contact,
@@ -9,10 +17,18 @@ import type {
   ProspectWorkspace,
   ResearchArtifact,
   ResearchCapture,
+  RedesignBrief,
   RedesignConcept,
   Task,
   Website,
 } from './domain';
+import {
+  buildManifestSchemaVersion,
+  codexBuilderContractVersion,
+  createBuildManifestData,
+  manifestSourceMatchesBrief,
+} from './build-manifest';
+import { createBriefDraft } from './redesign-brief';
 
 export type WorkspaceRepository = {
   bootstrap(): Promise<void>;
@@ -21,13 +37,52 @@ export type WorkspaceRepository = {
   listWorkspaces(): Promise<ProspectWorkspace[]>;
   createProspect(rawUrl: string, providedName?: string): Promise<ProspectWorkspace | undefined>;
   requestResearchCapture(businessId: string): Promise<ResearchCapture | undefined>;
+  continueResearchCapture(businessId: string): Promise<ResearchCapture | undefined>;
+  cancelResearchCapture(businessId: string): Promise<void>;
+  requestWebsiteAudit(businessId: string): Promise<Audit | undefined>;
+  cancelWebsiteAudit(businessId: string): Promise<void>;
+  updateAuditFinding(
+    finding: AuditFinding,
+    patch: Pick<AuditFinding, 'title' | 'finding' | 'recommendation' | 'severity' | 'reviewState'>,
+  ): Promise<void>;
+  requestAssetAnalysis(businessId: string): Promise<AssetAnalysisJob | undefined>;
+  cancelAssetAnalysis(businessId: string): Promise<void>;
+  requestAssetRefresh(businessId: string): Promise<AssetRefreshJob | undefined>;
+  cancelAssetRefresh(businessId: string): Promise<void>;
+  setAssetAnalysisSelected(asset: ResearchArtifact, selected: boolean): Promise<void>;
+  updateAssetAnnotation(
+    annotation: AssetAnnotation,
+    patch: Pick<
+      AssetAnnotation,
+      'suggestedRole' | 'businessAssociation' | 'reviewState' | 'humanNotes'
+    >,
+  ): Promise<void>;
+  saveBrandKit(
+    businessId: string,
+    draft: Pick<BrandKit, 'primaryLogoAssetId' | 'approvedAssetIds' | 'palette' | 'notes'>,
+    approve?: boolean,
+    recordActivity?: boolean,
+  ): Promise<BrandKit | undefined>;
+  createBrandAwareBriefRevision(businessId: string): Promise<RedesignBrief | undefined>;
+  createRedesignBrief(businessId: string): Promise<RedesignBrief | undefined>;
+  refreshRedesignBriefArchitecture(brief: RedesignBrief): Promise<RedesignBrief | undefined>;
+  updateRedesignBrief(
+    brief: RedesignBrief,
+    patch: Pick<RedesignBrief, 'sourceSelections' | 'draft'>,
+  ): Promise<void>;
+  approveRedesignBrief(brief: RedesignBrief): Promise<void>;
+  createBuildManifest(businessId: string): Promise<BuildManifest | undefined>;
+  requestWebsiteBuild(businessId: string): Promise<BuilderRun | undefined>;
+  resumeWebsiteBuild(builderRunId: string): Promise<BuilderRun | undefined>;
+  cancelWebsiteBuild(businessId: string): Promise<void>;
+  createBuilderPreviewUrl(builderRunId: string, mode?: BuilderPreviewMode): Promise<string>;
   setTaskState(task: Task, state: Task['state']): Promise<void>;
   approveForOutreach(businessId: string): Promise<boolean>;
   deleteProspect(businessId: string): Promise<boolean>;
 };
 
 const databaseName = 'siteforge-os';
-const databaseVersion = 2;
+const databaseVersion = 4;
 const legacyStorageKey = 'siteforge-os.records.v2';
 
 type StoreName =
@@ -35,6 +90,8 @@ type StoreName =
   | 'audits'
   | 'artifacts'
   | 'businesses'
+  | 'buildManifests'
+  | 'briefs'
   | 'concepts'
   | 'contacts'
   | 'crawlPages'
@@ -74,6 +131,8 @@ function openDatabase() {
       (
         [
           'businesses',
+          'buildManifests',
+          'briefs',
           'websites',
           'contacts',
           'crawlRuns',
@@ -245,6 +304,8 @@ export class SiteforgeRepository {
       businessId,
       status: 'research_pending',
       findings: [],
+      totalItems: 0,
+      completedItems: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -312,6 +373,8 @@ export class SiteforgeRepository {
       pages,
       artifacts,
       audits,
+      briefs,
+      buildManifests,
       concepts,
       reports,
       tasks,
@@ -324,21 +387,33 @@ export class SiteforgeRepository {
       this.getAllForBusiness<CapturedPage>('crawlPages', businessId),
       this.getAllForBusiness<ResearchArtifact>('artifacts', businessId),
       this.getAllForBusiness<Audit>('audits', businessId),
+      this.getAllForBusiness<RedesignBrief>('briefs', businessId),
+      this.getAllForBusiness<BuildManifest>('buildManifests', businessId),
       this.getAllForBusiness<RedesignConcept>('concepts', businessId),
       this.getAllForBusiness<DecisionReport>('reports', businessId),
       this.getAllForBusiness<Task>('tasks', businessId),
       this.getAllForBusiness<Activity>('activities', businessId),
     ]);
 
-    const latestCapture = captures.sort((left, right) =>
+    const orderedCaptures = captures.sort((left, right) =>
       right.requestedAt.localeCompare(left.requestedAt),
-    )[0];
+    );
+    const latestCapture = orderedCaptures[0];
+    const previousCapture =
+      latestCapture?.status === 'failed'
+        ? orderedCaptures.find(
+            (capture) => capture.id !== latestCapture.id && capture.status === 'ready',
+          )
+        : undefined;
 
     return {
       business,
       website: websites[0],
       contacts,
-      facts,
+      facts:
+        latestCapture?.status === 'ready'
+          ? facts.filter((fact) => fact.crawlRunId === latestCapture.id)
+          : [],
       latestCapture,
       capturedPages: latestCapture
         ? pages.filter((page) => page.crawlRunId === latestCapture.id)
@@ -346,7 +421,22 @@ export class SiteforgeRepository {
       artifacts: latestCapture
         ? artifacts.filter((artifact) => artifact.crawlRunId === latestCapture.id)
         : [],
+      assetAnnotations: [],
+      brandColourEvidence: [],
+      previousCapture,
+      previousFacts: previousCapture
+        ? facts.filter((fact) => fact.crawlRunId === previousCapture.id)
+        : [],
+      previousArtifacts: previousCapture
+        ? artifacts.filter((artifact) => artifact.crawlRunId === previousCapture.id)
+        : [],
       audit: audits[0],
+      redesignBrief: briefs.sort((left, right) => right.version - left.version)[0],
+      buildManifest: buildManifests.sort((left, right) =>
+        right.generatedAt.localeCompare(left.generatedAt),
+      )[0],
+      builderArtifacts: [],
+      builderEvents: [],
       concept: concepts[0],
       report: reports[0],
       tasks: tasks.sort((left, right) => left.state.localeCompare(right.state)),
@@ -395,6 +485,8 @@ export class SiteforgeRepository {
       businessId,
       status: 'research_pending',
       findings: [],
+      totalItems: 0,
+      completedItems: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -451,6 +543,7 @@ export class SiteforgeRepository {
       ...tasks.map((task) => ['tasks', task] as [StoreName, Task]),
       ['activities', activity],
     ]);
+    await this.requestResearchCapture(businessId);
     return this.getWorkspace(businessId);
   }
 
@@ -474,19 +567,21 @@ export class SiteforgeRepository {
       businessId,
       websiteId: website.id,
       targetUrl: website.url,
-      scope: 'homepage',
+      scope: 'all_pages',
       status: 'queued',
       requestedAt: now,
       discoveredPageCount: 0,
       capturedPageCount: 0,
       failedPageCount: 0,
+      progressPhase: 'queued',
+      progressDetail: 'Waiting for the protected worker to begin.',
     };
     const activity: Activity = {
       id: id('activity'),
       businessId,
       type: 'research_requested',
       message:
-        'Homepage capture requested. Evidence will remain private until a worker completes it.',
+        'Website capture requested. Discoverable public pages will remain private until a worker completes it.',
       createdAt: now,
     };
     await this.putMany([
@@ -496,6 +591,425 @@ export class SiteforgeRepository {
       ['activities', activity],
     ]);
     return capture;
+  }
+
+  async continueResearchCapture(businessId: string) {
+    const captures = await this.getAllForBusiness<ResearchCapture>('crawlRuns', businessId);
+    const capture = captures
+      .filter((candidate) => candidate.status === 'failed' && !candidate.cancelRequestedAt)
+      .sort((left, right) => right.requestedAt.localeCompare(left.requestedAt))[0];
+    if (!capture) throw new Error('There is no failed website capture to continue.');
+    const now = new Date().toISOString();
+    const continued = {
+      ...capture,
+      status: 'queued',
+      requestedAt: now,
+      startedAt: undefined,
+      completedAt: undefined,
+      errorSummary: undefined,
+      failurePhase: undefined,
+      failureUrl: undefined,
+      failureDetail: undefined,
+      progressPhase: 'queued',
+      progressDetail: 'Continuation requested. The worker will retry the incomplete capture step.',
+      currentUrl: capture.failureUrl ?? capture.currentUrl ?? capture.targetUrl,
+    } satisfies ResearchCapture;
+    await this.put('crawlRuns', continued);
+    return continued;
+  }
+
+  async cancelResearchCapture(businessId: string) {
+    const [website, captures] = await Promise.all([
+      this.getAllForBusiness<Website>('websites', businessId).then((websites) => websites[0]),
+      this.getAllForBusiness<ResearchCapture>('crawlRuns', businessId),
+    ]);
+    const capture = captures
+      .filter((candidate) => candidate.status === 'queued' || candidate.status === 'running')
+      .sort((left, right) => right.requestedAt.localeCompare(left.requestedAt))[0];
+    if (!capture) throw new Error('There is no active website capture to cancel.');
+    const now = new Date().toISOString();
+    await this.put('crawlRuns', {
+      ...capture,
+      status: 'cancelled',
+      cancelRequestedAt: now,
+      completedAt: now,
+      progressPhase: 'cancelled',
+      progressDetail: 'Capture cancelled before a protected worker completed it.',
+      errorSummary: 'Capture cancelled by a workspace user.',
+    } satisfies ResearchCapture);
+    if (website) {
+      await this.put('websites', { ...website, crawlStatus: 'not_requested', updatedAt: now });
+    }
+    await this.put('activities', {
+      id: id('activity'),
+      businessId,
+      type: 'note',
+      message: 'Website capture cancelled in local mode.',
+      createdAt: now,
+    } satisfies Activity);
+  }
+
+  async requestWebsiteAudit(businessId: string) {
+    const [business, audits, captures] = await Promise.all([
+      this.get<Business>('businesses', businessId),
+      this.getAllForBusiness<Audit>('audits', businessId),
+      this.getAllForBusiness<ResearchCapture>('crawlRuns', businessId),
+    ]);
+    const completedCapture = captures
+      .filter((capture) => capture.status === 'ready')
+      .sort((left, right) => right.requestedAt.localeCompare(left.requestedAt))[0];
+    if (!business || !completedCapture) {
+      throw new Error('A completed website capture is required before an audit can be generated.');
+    }
+    const now = new Date().toISOString();
+    const audit = audits[0] ?? {
+      id: id('audit'),
+      businessId,
+      status: 'not_started' as const,
+      findings: [],
+      totalItems: 0,
+      completedItems: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const updatedAudit: Audit = {
+      ...audit,
+      status: 'ready',
+      findings: audit.findings,
+      updatedAt: now,
+    };
+    await this.putMany([
+      ['audits', updatedAudit],
+      ['businesses', { ...business, stage: 'audit_ready', updatedAt: now }],
+      [
+        'activities',
+        {
+          id: id('activity'),
+          businessId,
+          type: 'note',
+          message:
+            'Audit requested in local mode. Connect the protected audit worker to generate findings from saved evidence.',
+          createdAt: now,
+        } satisfies Activity,
+      ],
+    ]);
+    return updatedAudit;
+  }
+
+  async cancelWebsiteAudit(businessId: string) {
+    const audits = await this.getAllForBusiness<Audit>('audits', businessId);
+    const audit = audits.find(
+      (candidate) => candidate.status === 'research_pending' || candidate.status === 'running',
+    );
+    if (!audit) throw new Error('There is no active website audit to cancel.');
+    await this.put('audits', {
+      ...audit,
+      status: 'cancelled',
+      cancelRequestedAt: new Date().toISOString(),
+      progressPhase: 'cancelled',
+      progressDetail: 'Audit cancelled in local mode.',
+    });
+  }
+
+  async updateAuditFinding(
+    finding: AuditFinding,
+    patch: Pick<AuditFinding, 'title' | 'finding' | 'recommendation' | 'severity' | 'reviewState'>,
+  ) {
+    const audits = await this.getAll<Audit>('audits');
+    const audit = audits.find((candidate) =>
+      candidate.findings.some((candidateFinding) => candidateFinding.id === finding.id),
+    );
+    if (!audit) throw new Error('The audit finding could not be found.');
+    const now = new Date().toISOString();
+    await this.put('audits', {
+      ...audit,
+      findings: audit.findings.map((candidate) =>
+        candidate.id === finding.id ? { ...candidate, ...patch } : candidate,
+      ),
+      updatedAt: now,
+    });
+  }
+
+  async requestAssetAnalysis(): Promise<AssetAnalysisJob | undefined> {
+    throw new Error('Asset analysis requires the protected Supabase worker.');
+  }
+
+  async cancelAssetAnalysis(): Promise<void> {
+    throw new Error('Asset analysis requires the protected Supabase worker.');
+  }
+
+  async requestAssetRefresh(): Promise<AssetRefreshJob | undefined> {
+    throw new Error('Image-only refresh requires the protected Supabase worker.');
+  }
+
+  async cancelAssetRefresh(): Promise<void> {
+    throw new Error('Image-only refresh requires the protected Supabase worker.');
+  }
+
+  async setAssetAnalysisSelected(asset: ResearchArtifact, selected: boolean): Promise<void> {
+    await this.put('artifacts', {
+      ...asset,
+      metadata: { ...asset.metadata, analysisSelected: selected },
+    } satisfies ResearchArtifact);
+  }
+
+  async updateAssetAnnotation() {
+    throw new Error('Asset annotations require the protected Supabase worker.');
+  }
+
+  async saveBrandKit(): Promise<BrandKit | undefined> {
+    throw new Error('Brand Kits require the protected Supabase workspace.');
+  }
+
+  async createBrandAwareBriefRevision(): Promise<RedesignBrief | undefined> {
+    throw new Error('Brand-aware revisions require the protected Supabase workspace.');
+  }
+
+  async createRedesignBrief(businessId: string) {
+    const workspace = await this.getWorkspace(businessId);
+    if (
+      !workspace?.researchPacket ||
+      !workspace.latestCapture ||
+      workspace.latestCapture.status !== 'ready'
+    ) {
+      throw new Error(
+        'A completed Research Packet is required before a redesign brief can be drafted.',
+      );
+    }
+    if (
+      !workspace.researchPacket.data.capabilityAnalysis ||
+      typeof workspace.researchPacket.data.capabilityAnalysis !== 'object' ||
+      (workspace.researchPacket.data.capabilityAnalysis as Record<string, unknown>).status !==
+        'ready'
+    ) {
+      throw new Error(
+        'AI capability analysis must complete from the saved capture before a brief can be drafted.',
+      );
+    }
+    const existingBriefs = await this.getAllForBusiness<RedesignBrief>('briefs', businessId);
+    const latestBrief = existingBriefs.sort((left, right) => right.version - left.version)[0];
+    if (latestBrief?.status === 'draft' && Array.isArray(latestBrief.draft.capabilityInventory)) {
+      return latestBrief;
+    }
+    if (
+      latestBrief?.status === 'approved' &&
+      manifestSourceMatchesBrief(workspace, latestBrief) &&
+      Array.isArray(latestBrief.draft.capabilityInventory)
+    ) {
+      return latestBrief;
+    }
+    const now = new Date().toISOString();
+    const generated = createBriefDraft(
+      workspace.business.name,
+      workspace.researchPacket,
+      workspace.artifacts,
+      workspace.assetAnnotations,
+      undefined,
+      workspace.capturedPages,
+    );
+    generated.sourceSelections.pageUrls = [
+      ...new Set(workspace.capturedPages.map((page) => page.url)),
+    ];
+    generated.sourceSelections.assetIds = [
+      ...new Set(
+        workspace.artifacts
+          .filter((artifact) => artifact.kind === 'asset')
+          .map((artifact) => artifact.id),
+      ),
+    ];
+    const isLegacyDraft = latestBrief?.status === 'draft';
+    const brief: RedesignBrief = {
+      id: id('brief'),
+      businessId,
+      researchPacketId: workspace.researchPacket.id,
+      crawlRunId: workspace.latestCapture.id,
+      status: 'draft',
+      version: (latestBrief?.version ?? 0) + 1,
+      sourceSelections: isLegacyDraft ? latestBrief.sourceSelections : generated.sourceSelections,
+      draft: isLegacyDraft
+        ? { ...latestBrief.draft, capabilityInventory: generated.draft.capabilityInventory }
+        : generated.draft,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await this.putMany([
+      [
+        'briefs',
+        isLegacyDraft
+          ? {
+              ...brief,
+              id: latestBrief.id,
+              version: latestBrief.version,
+              createdAt: latestBrief.createdAt,
+            }
+          : brief,
+      ],
+      ['businesses', { ...workspace.business, stage: 'awaiting_approval', updatedAt: now }],
+      [
+        'activities',
+        {
+          id: id('activity'),
+          businessId,
+          type: 'note',
+          message: isLegacyDraft
+            ? 'Capability inventory generated from saved capture evidence without a new website scrape.'
+            : `Redesign brief v${(latestBrief?.version ?? 0) + 1} drafted from the reviewed Research Packet.`,
+          createdAt: now,
+        } satisfies Activity,
+      ],
+    ]);
+    return isLegacyDraft
+      ? {
+          ...brief,
+          id: latestBrief.id,
+          version: latestBrief.version,
+          createdAt: latestBrief.createdAt,
+        }
+      : brief;
+  }
+
+  async refreshRedesignBriefArchitecture(brief: RedesignBrief) {
+    if (brief.status !== 'draft') {
+      throw new Error(
+        'Approved briefs cannot be changed. Create a new draft before refreshing it.',
+      );
+    }
+    const workspace = await this.getWorkspace(brief.businessId);
+    if (
+      !workspace?.researchPacket ||
+      !workspace.latestCapture ||
+      workspace.latestCapture.id !== brief.crawlRunId
+    ) {
+      throw new Error(
+        'This draft belongs to an earlier capture. Create a new brief revision instead.',
+      );
+    }
+    const generated = createBriefDraft(
+      workspace.business.name,
+      workspace.researchPacket,
+      workspace.artifacts,
+      workspace.assetAnnotations,
+      workspace.brandKit,
+      workspace.capturedPages,
+      brief.sourceSelections.pageUrls,
+    );
+    const now = new Date().toISOString();
+    const refreshed: RedesignBrief = {
+      ...brief,
+      draft: {
+        ...brief.draft,
+        strategy: generated.draft.strategy,
+        proposedSitemap: generated.draft.proposedSitemap,
+        pagePlans: generated.draft.pagePlans,
+      },
+      updatedAt: now,
+    };
+    await this.putMany([
+      ['briefs', refreshed],
+      [
+        'activities',
+        {
+          id: id('activity'),
+          businessId: brief.businessId,
+          type: 'note',
+          message: `Redesign brief v${brief.version} architecture regenerated from selected captured pages.`,
+          createdAt: now,
+        } satisfies Activity,
+      ],
+    ]);
+    return refreshed;
+  }
+
+  async updateRedesignBrief(
+    brief: RedesignBrief,
+    patch: Pick<RedesignBrief, 'sourceSelections' | 'draft'>,
+  ) {
+    if (brief.status === 'approved') {
+      throw new Error('Approved briefs cannot be changed. Create a new draft for further changes.');
+    }
+    await this.put('briefs', { ...brief, ...patch, updatedAt: new Date().toISOString() });
+  }
+
+  async approveRedesignBrief(brief: RedesignBrief) {
+    const business = await this.get<Business>('businesses', brief.businessId);
+    if (!business) throw new Error('The prospect could not be found.');
+    if (brief.status === 'approved') return;
+    const now = new Date().toISOString();
+    await this.putMany([
+      ['briefs', { ...brief, status: 'approved', approvedAt: now, updatedAt: now }],
+      ['businesses', { ...business, stage: 'concept_ready', updatedAt: now }],
+      [
+        'activities',
+        {
+          id: id('activity'),
+          businessId: brief.businessId,
+          type: 'approved',
+          message: 'Redesign brief approved. A builder can now use the approved strategy.',
+          createdAt: now,
+        } satisfies Activity,
+      ],
+    ]);
+  }
+
+  async createBuildManifest(businessId: string) {
+    const workspace = await this.getWorkspace(businessId);
+    const brief = workspace?.redesignBrief;
+    if (!workspace || !brief || brief.status !== 'approved') {
+      throw new Error('Approve the redesign brief before preparing a Build Manifest.');
+    }
+    if (!manifestSourceMatchesBrief(workspace, brief)) {
+      throw new Error(
+        'This approved brief belongs to an earlier capture. Create and approve a new brief before preparing a Build Manifest.',
+      );
+    }
+    if (workspace.buildManifest) return workspace.buildManifest;
+
+    const now = new Date().toISOString();
+    const manifest: BuildManifest = {
+      id: id('manifest'),
+      businessId,
+      redesignBriefId: brief.id,
+      researchPacketId: brief.researchPacketId,
+      crawlRunId: brief.crawlRunId,
+      schemaVersion: buildManifestSchemaVersion,
+      builderContractVersion: codexBuilderContractVersion,
+      status: 'ready',
+      data: createBuildManifestData(workspace, brief),
+      generatedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await this.putMany([
+      ['buildManifests', manifest],
+      [
+        'activities',
+        {
+          id: id('activity'),
+          businessId,
+          type: 'note',
+          message:
+            'Build Manifest prepared from the approved redesign brief for the future Codex builder.',
+          createdAt: now,
+        } satisfies Activity,
+      ],
+    ]);
+    return manifest;
+  }
+
+  async requestWebsiteBuild(): Promise<BuilderRun | undefined> {
+    throw new Error('Private preview builds require the protected Supabase builder worker.');
+  }
+
+  async resumeWebsiteBuild(): Promise<BuilderRun | undefined> {
+    throw new Error('Private preview builds require the protected Supabase builder worker.');
+  }
+
+  async cancelWebsiteBuild(): Promise<void> {
+    throw new Error('Private preview builds require the protected Supabase builder worker.');
+  }
+
+  async createBuilderPreviewUrl(): Promise<string> {
+    throw new Error('Private preview builds require the protected Supabase preview service.');
   }
 
   async setTaskState(task: Task, state: Task['state']) {
@@ -558,6 +1072,7 @@ export class SiteforgeRepository {
       this.getAllForBusiness<ResearchArtifact>('artifacts', businessId),
       this.getAllForBusiness<EvidenceFact>('facts', businessId),
       this.getAllForBusiness<Audit>('audits', businessId),
+      this.getAllForBusiness<BuildManifest>('buildManifests', businessId),
       this.getAllForBusiness<RedesignConcept>('concepts', businessId),
       this.getAllForBusiness<DecisionReport>('reports', businessId),
       this.getAllForBusiness<Task>('tasks', businessId),
@@ -572,6 +1087,7 @@ export class SiteforgeRepository {
       'artifacts',
       'facts',
       'audits',
+      'buildManifests',
       'concepts',
       'reports',
       'tasks',
@@ -589,6 +1105,7 @@ export class SiteforgeRepository {
       'artifacts',
       'facts',
       'audits',
+      'buildManifests',
       'concepts',
       'reports',
       'tasks',

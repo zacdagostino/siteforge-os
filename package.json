@@ -3,8 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
+    "start:local": "node worker/local-dev.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "typecheck": "tsc -b",
@@ -17,6 +21,10 @@
     "test:a11y": "playwright test tests/e2e/accessibility.spec.js",
     "test:ui": "playwright test tests/e2e/responsive.spec.js",
     "worker:capture": "node worker/capture-worker.mjs",
+    "worker:audit": "node worker/audit-worker.mjs",
+    "worker:assets": "node worker/asset-analysis-worker.mjs",
+    "worker:builder": "node worker/builder-worker.mjs",
+    "workers": "node worker/supervisor.mjs",
     "test:worker": "node --test tests/worker/*.test.mjs",
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test:e2e"
   },
@@ -26,6 +34,7 @@
     "@vitejs/plugin-react": "^6.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "imagetracerjs": "1.2.6",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

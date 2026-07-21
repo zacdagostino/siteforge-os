@@ -37,6 +37,7 @@ export type ToastNotice = {
   id: string;
   title: string;
   detail: string;
+  tone?: 'success' | 'warning' | 'danger' | 'info';
   action?: { label: string; onClick: () => void };
 };
 
@@ -50,7 +51,11 @@ export function ToastRegion({
   if (!notice) return null;
   return (
     <aside aria-atomic="true" aria-live="polite" className="toast-region">
-      <div className="toast" role="status">
+      <div
+        className={cn('toast', `toast--${notice.tone ?? 'success'}`)}
+        key={notice.id}
+        role="status"
+      >
         <div className="toast__content">
           <strong>{notice.title}</strong>
           <p>{notice.detail}</p>
