@@ -7,7 +7,7 @@ import type {
 } from './domain';
 
 export const buildManifestSchemaVersion = 1;
-export const codexBuilderContractVersion = 'siteforge-codex-builder-v2';
+export const codexBuilderContractVersion = 'siteforge-codex-builder-v3';
 
 const builderRules = [
   'Build a complete mobile-first website from this manifest, not a superficial reskin of the captured website.',

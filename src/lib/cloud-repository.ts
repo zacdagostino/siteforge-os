@@ -12,6 +12,7 @@ import type {
   BuilderEvent,
   BuilderPreviewMode,
   BuilderRun,
+  BuilderRunMode,
   CapturedPage,
   Business,
   Contact,
@@ -434,6 +435,13 @@ function builderRunFromRow(row: DatabaseRow): BuilderRun {
     id: readString(row, 'id'),
     businessId: readString(row, 'business_id'),
     buildManifestId: readString(row, 'build_manifest_id'),
+    buildMode:
+      readString(row, 'build_mode') === 'full_site'
+        ? 'full_site'
+        : readString(row, 'build_mode') === 'page_test'
+          ? 'page_test'
+          : 'homepage_test',
+    targetSourceUrl: readOptionalString(row, 'target_source_url'),
     status:
       status === 'queued' ||
       status === 'running' ||
@@ -668,26 +676,22 @@ export class SupabaseWorkspaceRepository implements WorkspaceRepository {
         .from('asset_analysis_jobs')
         .select('*')
         .eq('business_id', businessId)
-        .order('created_at', { ascending: false })
-        .limit(1),
+        .order('created_at', { ascending: false }),
       this.client
         .from('redesign_briefs')
         .select('*')
         .eq('business_id', businessId)
-        .order('version', { ascending: false })
-        .limit(1),
+        .order('version', { ascending: false }),
       this.client
         .from('build_manifests')
         .select('*')
         .eq('business_id', businessId)
-        .order('generated_at', { ascending: false })
-        .limit(1),
+        .order('generated_at', { ascending: false }),
       this.client
         .from('builder_runs')
         .select('*')
         .eq('business_id', businessId)
-        .order('created_at', { ascending: false })
-        .limit(1),
+        .order('created_at', { ascending: false }),
       this.client
         .from('redesign_concepts')
         .select('*')
@@ -866,6 +870,7 @@ export class SupabaseWorkspaceRepository implements WorkspaceRepository {
     return {
       business: businessFromRow(businessRow as DatabaseRow),
       website,
+      captures: orderedCaptures,
       contacts: ((contacts.data ?? []) as DatabaseRow[]).map(contactFromRow),
       facts:
         latestCapture?.status === 'ready' ||
@@ -888,6 +893,7 @@ export class SupabaseWorkspaceRepository implements WorkspaceRepository {
       assetAnalysis: (assetJobs.data ?? [])[0]
         ? assetAnalysisFromRow((assetJobs.data ?? [])[0] as DatabaseRow)
         : undefined,
+      assetAnalysisJobs: ((assetJobs.data ?? []) as DatabaseRow[]).map(assetAnalysisFromRow),
       assetAnnotations: ((annotationsResult.data ?? []) as DatabaseRow[])
         .map(assetAnnotationFromRow)
         .filter((annotation) => annotation.crawlRunId === latestCapture?.id),
@@ -900,10 +906,13 @@ export class SupabaseWorkspaceRepository implements WorkspaceRepository {
       redesignBrief: (briefs.data ?? [])[0]
         ? briefFromRow((briefs.data ?? [])[0] as DatabaseRow)
         : undefined,
+      redesignBriefs: ((briefs.data ?? []) as DatabaseRow[]).map(briefFromRow),
       buildManifest: (manifests.data ?? [])[0]
         ? buildManifestFromRow((manifests.data ?? [])[0] as DatabaseRow)
         : undefined,
+      buildManifests: ((manifests.data ?? []) as DatabaseRow[]).map(buildManifestFromRow),
       latestBuilderRun: latestBuilderRun ? builderRunFromRow(latestBuilderRun) : undefined,
+      builderRuns: ((builderRuns.data ?? []) as DatabaseRow[]).map(builderRunFromRow),
       builderArtifacts: ((builderArtifactsResult.data ?? []) as DatabaseRow[]).map(
         builderArtifactFromRow,
       ),
@@ -1528,9 +1537,15 @@ export class SupabaseWorkspaceRepository implements WorkspaceRepository {
     return buildManifestFromRow(data as DatabaseRow);
   }
 
-  async requestWebsiteBuild(businessId: string) {
+  async requestWebsiteBuild(
+    businessId: string,
+    mode: BuilderRunMode = 'homepage_test',
+    targetSourceUrl?: string,
+  ) {
     const { error } = await this.client.rpc('request_website_build', {
       target_business_id: businessId,
+      requested_mode: mode,
+      requested_target_source_url: targetSourceUrl ?? null,
     });
     throwIfError(error);
     const workspace = await this.getWorkspace(businessId);
@@ -1554,6 +1569,45 @@ export class SupabaseWorkspaceRepository implements WorkspaceRepository {
   async cancelWebsiteBuild(businessId: string) {
     const { error } = await this.client.rpc('cancel_website_build', {
       target_business_id: businessId,
+    });
+    throwIfError(error);
+  }
+
+  async deleteWebsiteBuild(builderRunId: string) {
+    const { error } = await this.client.rpc('delete_website_build', {
+      target_builder_run_id: builderRunId,
+    });
+    throwIfError(error);
+  }
+
+  async deleteWebsiteBuildHistory(businessId: string) {
+    const { error } = await this.client.rpc('delete_website_build_history', {
+      target_business_id: businessId,
+    });
+    throwIfError(error);
+  }
+
+  async deleteManagedRecord(
+    kind: 'capture' | 'asset_analysis' | 'brief' | 'manifest' | 'build',
+    id: string,
+  ) {
+    if (kind === 'build') return this.deleteWebsiteBuild(id);
+    const table =
+      kind === 'capture'
+        ? 'crawl_runs'
+        : kind === 'asset_analysis'
+          ? 'asset_analysis_jobs'
+          : kind === 'brief'
+            ? 'redesign_briefs'
+            : 'build_manifests';
+    const { error } = await this.client.from(table).delete().eq('id', id);
+    throwIfError(error);
+  }
+
+  async deleteBuildPackage(businessId: string, redesignBriefId: string) {
+    const { error } = await this.client.rpc('delete_build_package', {
+      target_business_id: businessId,
+      target_redesign_brief_id: redesignBriefId,
     });
     throwIfError(error);
   }

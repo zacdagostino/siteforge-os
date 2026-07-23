@@ -1,4 +1,4 @@
-# SiteForge Codex Builder Contract v2
+# SiteForge Codex Builder Contract v3
 
 The builder receives an approved Build Manifest, a private content dossier for every selected source page, and only private, server-side access to the referenced approved assets. The manifest and source-page dossier are the source of truth for content, information architecture, permissions, visual identity, and unresolved questions.
 
@@ -9,3 +9,5 @@ When the manifest contains a Brand Kit, the builder must use its primary logo as
 Every selected source page is required output. The private source-page index assigns it a deterministic output path, and each matching HTML file must record its exact source URL in a `siteforge-source-url` meta tag. The builder may rewrite and condense captured copy for clarity and conversion, but it must retain material services, operational details, calls to action, forms/tools, legal content, and resource content without strengthening claims.
 
 The builder's implementation must use semantic HTML, accessible keyboard and form behaviour, responsive layouts, design tokens, reusable components, and performance-conscious assets. It must return a build result and quality-check evidence to a future SiteForge builder worker; it does not modify the manifest.
+
+Motion is a built-in enhancement, not an optional prompt. Every generated page must retain and load the template's local `main.js` motion runtime. It progressively reveals titles, content containers, and supported cards as they enter the viewport; it can animate clearly labelled numeric values with `data-counter`. When captured content includes a factual number that is presented as a metric, apply the counter hook when it supports scanning; never invent a statistic merely to animate it. Use motion to support hierarchy, never to delay required content or decorate every element. The runtime must respect `prefers-reduced-motion`, avoid remote scripts and dependencies, preserve keyboard and pointer interaction, and leave content fully visible when JavaScript or IntersectionObserver is unavailable.

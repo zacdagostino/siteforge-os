@@ -58,7 +58,10 @@ async function openReadyBuildManifest(page) {
           redesignBriefId: brief.id,
         },
         permittedFacts: [{ id: 'fact-1' }, { id: 'fact-2' }],
-        selectedPages: [{ url: 'https://example.com/' }],
+        selectedPages: [
+          { url: 'https://example.com/', title: 'Home' },
+          { url: 'https://example.com/services', title: 'Services' },
+        ],
         selectedAssets: [{ artifactId: 'asset-1' }],
         approvedAssetGuidance: [],
         strategy: brief.draft.strategy,
@@ -170,6 +173,30 @@ test('opens prospect settings from the header and restores focus when dismissed'
   await expect(trigger).toBeFocused();
 });
 
+test('keeps the prospect identity controls in a full-width header container', async ({ page }) => {
+  await page.goto('/#/prospects/business-demo-local-services/overview');
+  await expect(page.getByLabel('Loading SiteForge OS workspace')).toBeHidden();
+
+  const header = page.locator('.workspace-header');
+  const identityRow = page.locator('.workspace-header__identity-row');
+  const identity = identityRow.locator('.business-identity--title');
+  const settings = page.getByLabel('Open prospect settings');
+  const [headerBox, identityBox, businessBox, settingsBox] = await Promise.all([
+    header.boundingBox(),
+    identityRow.boundingBox(),
+    identity.boundingBox(),
+    settings.boundingBox(),
+  ]);
+
+  expect(headerBox).not.toBeNull();
+  expect(identityBox).not.toBeNull();
+  expect(businessBox).not.toBeNull();
+  expect(settingsBox).not.toBeNull();
+  expect(Math.abs(identityBox.width - headerBox.width)).toBeLessThanOrEqual(1);
+  expect(settingsBox.x).toBeGreaterThan(businessBox.x);
+  expect(Math.abs(settingsBox.y - businessBox.y)).toBeLessThanOrEqual(16);
+});
+
 test('transitions the workspace title from loading into navigation', async ({ page }) => {
   await page.goto('/');
 
@@ -180,6 +207,31 @@ test('transitions the workspace title from loading into navigation', async ({ pa
   await expect(loader).toBeHidden();
   await expect(page.locator('.brand--loading-hidden')).toHaveCount(0);
   await expect(page.locator('.brand').first()).toContainText('SiteForge OS');
+});
+
+test('positions the workspace loading title for each viewport', async ({ page }, testInfo) => {
+  await page.goto('/');
+
+  const title = page.locator('.workspace-loading__letters');
+  const description = page.locator('.workspace-loading p');
+  await expect(title).toBeVisible();
+  await expect(description).toBeVisible();
+
+  const [titleBox, descriptionBox, viewportHeight] = await Promise.all([
+    title.boundingBox(),
+    description.boundingBox(),
+    page.evaluate(() => window.visualViewport?.height ?? window.innerHeight),
+  ]);
+  expect(titleBox).not.toBeNull();
+  expect(descriptionBox).not.toBeNull();
+
+  if (!titleBox || !descriptionBox) return;
+
+  const titleCenter = titleBox.y + titleBox.height / 2;
+  const expectedCenter =
+    testInfo.project.name === 'mobile' ? viewportHeight / 2 - 48 : viewportHeight / 2;
+  expect(Math.abs(titleCenter - expectedCenter)).toBeLessThanOrEqual(1);
+  expect(descriptionBox.y - (titleBox.y + titleBox.height)).toBeLessThanOrEqual(48);
 });
 
 test('gives the page a restrained elastic response at its scroll boundaries', async ({ page }) => {
@@ -245,11 +297,15 @@ test('uses a persistent desktop sidebar', async ({ page }, testInfo) => {
   await expect(page.getByRole('button', { name: 'Today' }).first()).toBeVisible();
 });
 
-test('keeps the build manifest compact and reveals its safeguards on demand', async ({ page }) => {
+test('puts the build manifest package before the private preview and opens its details', async ({
+  page,
+}) => {
   await openReadyBuildManifest(page);
 
-  const summary = page.locator('.build-manifest-summary');
-  const summaryItems = summary.locator('> div');
+  await expect(page.locator('.brief-panel')).toHaveScreenshot('build-manifest-ready.png');
+
+  const manifestPackage = page.getByRole('button', { name: /approved and ready for the builder/i });
+  const summaryItems = manifestPackage.locator('.build-manifest-summary > span');
   await expect(summaryItems).toHaveCount(4);
   const [firstItem, secondItem] = await Promise.all([
     summaryItems.nth(0).boundingBox(),
@@ -257,23 +313,60 @@ test('keeps the build manifest compact and reveals its safeguards on demand', as
   ]);
   expect(firstItem).not.toBeNull();
   expect(secondItem).not.toBeNull();
+  const buildAction = page.getByRole('button', { name: 'Continue developing' });
+  const handoffActions = page.locator('.builder-handoff__actions');
+  const [buildActionBox, settingsBox, statusBox] = await Promise.all([
+    buildAction.boundingBox(),
+    handoffActions.getByRole('button', { name: 'Builder settings' }).boundingBox(),
+    handoffActions.locator('.status-badge').boundingBox(),
+  ]);
+  expect(buildActionBox).not.toBeNull();
+  expect(settingsBox).not.toBeNull();
+  expect(statusBox).not.toBeNull();
+  if (!firstItem || !buildActionBox || !settingsBox || !statusBox) return;
+  expect(firstItem.y + firstItem.height).toBeLessThanOrEqual(buildActionBox.y);
+  expect(
+    Math.abs(settingsBox.y + settingsBox.height / 2 - (statusBox.y + statusBox.height / 2)),
+  ).toBeLessThanOrEqual(1);
   expect(Math.abs(secondItem.y - firstItem.y)).toBeLessThan(3);
-  await expect(page.locator('.brief-panel')).toHaveScreenshot('build-manifest-ready.png');
 
-  const safeguards = page.locator('.build-manifest-boundaries');
-  await expect(safeguards).not.toHaveAttribute('open', '');
-  await safeguards.locator('summary').click();
-  await expect(safeguards).toHaveAttribute('open', '');
-  await expect(safeguards).toContainText('Permitted facts remain tied');
+  const pagePicker = page.getByLabel('Page to test');
+  await expect(pagePicker).toBeDisabled();
+  await expect(
+    page.getByText('Complete a homepage test before testing another page.'),
+  ).toBeVisible();
 
-  const contract = page.locator('.build-manifest-contract');
-  await expect(contract).not.toHaveAttribute('open', '');
-  await contract.locator('summary').click();
-  await expect(contract).toHaveAttribute('open', '');
-  await expect(contract).toContainText('Keep the preview private.');
+  await manifestPackage.click();
+  const dialog = page.getByRole('dialog', { name: 'Build Manifest ready' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('Permitted facts remain tied');
+  await expect(dialog).toContainText('Keep the preview private.');
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(manifestPackage).toBeFocused();
   await expect
     .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
     .toBe(true);
+});
+
+test('groups linked build records and offers one package deletion action in Data', async ({
+  page,
+}) => {
+  await openReadyBuildManifest(page);
+  await page.goto('/#/data');
+
+  const buildPackage = page.locator('.data-management__group').filter({
+    hasText: 'Build package · Brief v1',
+  });
+  await expect(buildPackage).toContainText('Brief v1 · approved');
+  await expect(buildPackage).toContainText('Build Manifest · Version 1');
+  await expect(buildPackage.getByRole('button', { name: 'Delete package' })).toBeVisible();
+
+  await buildPackage.getByRole('button', { name: 'Delete package' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Delete build package' });
+  await expect(dialog).toContainText('including its brief, Build Manifest');
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
 });
 
 test('opens the shared builder settings panel from the navigation settings page', async ({
@@ -293,14 +386,13 @@ test('opens the shared builder settings panel from the navigation settings page'
   await expect(page.getByRole('button', { name: 'Builder settings' })).toBeFocused();
 });
 
-test('opens the same builder settings panel from the Redesign tab', async ({ page }) => {
-  await page.goto('/#/prospects');
-  await page.getByLabel('Public website URL').fill('builder-settings.example');
-  await page.getByRole('button', { name: 'Create' }).click();
-  await page.getByRole('button', { name: 'View prospect' }).click();
-  await page.getByRole('tab', { name: 'Redesign' }).click();
+test('opens builder settings from the Builder handoff header', async ({ page }) => {
+  await openReadyBuildManifest(page);
 
-  await page.getByRole('button', { name: 'Builder settings' }).click();
+  const handoff = page.locator('.brief-panel__header').first();
+  const settingsButton = handoff.getByRole('button', { name: 'Builder settings' });
+  await expect(settingsButton).toBeVisible();
+  await settingsButton.click();
   const panel = page.getByRole('dialog', { name: 'Builder settings' });
   await expect(panel).toBeVisible();
   await expect(panel).toContainText('Private, expiring links');
@@ -357,7 +449,7 @@ test('creates a persistent prospect workspace from a public URL', async ({ page 
 
   await expect(page.getByRole('status')).toContainText('Prospect created');
   await expect(page.locator('.toast')).toBeVisible();
-  await expect(page.locator('.toast')).toHaveCSS('animation-name', 'toast-in');
+  await expect(page.locator('.toast')).toHaveCSS('animation-name', /(?:^|,\s*)toast-in(?:,|$)/);
   const toastBox = await page.locator('.toast-region').boundingBox();
   expect(toastBox).not.toBeNull();
   expect(toastBox.x).toBeGreaterThanOrEqual(12);
@@ -411,9 +503,11 @@ test('queues one private website capture and keeps its state after reload', asyn
   await page.getByRole('tab', { name: 'Research' }).click();
 
   const capturePanel = page.locator('.research-capture');
+  const siteMap = page.locator('.captured-site-map');
   await expect(capturePanel).toContainText(
     'The website capture is queued for the protected worker',
   );
+  await expect(siteMap).toHaveCount(0);
   await expect(
     capturePanel.getByRole('progressbar', { name: 'Website capture progress' }),
   ).toBeVisible();
@@ -505,7 +599,7 @@ test('prevents duplicate prospect URLs and deletes a prospect after confirmation
   await page.getByLabel('Public website URL').fill('duplicate-check.example');
   await page.getByRole('button', { name: 'Create' }).click();
   await page.getByRole('button', { name: 'View prospect' }).click();
-  await page.getByRole('button', { name: 'Back to prospects' }).click();
+  await page.getByRole('button', { name: 'All prospects' }).click();
 
   await page.getByLabel('Public website URL').fill('https://duplicate-check.example/');
   await page.getByRole('button', { name: 'Create' }).click();
@@ -515,8 +609,10 @@ test('prevents duplicate prospect URLs and deletes a prospect after confirmation
   ).toHaveCount(1);
 
   await page.getByRole('button', { name: 'Duplicate Check' }).click();
-  await page.getByRole('tab', { name: 'Settings' }).click();
-  await page.getByRole('button', { name: 'Delete prospect' }).click();
+  await page.getByLabel('Open prospect settings').click();
+  const settingsDialog = page.getByRole('dialog', { name: 'Prospect settings' });
+  await expect(settingsDialog).toBeVisible();
+  await settingsDialog.getByRole('button', { name: 'Delete prospect' }).click();
   await expect(page.getByRole('dialog', { name: 'Delete this prospect?' })).toBeVisible();
   await page.getByRole('button', { name: 'Delete prospect' }).last().click();
   await expect(page.getByRole('heading', { name: 'Prospects' })).toBeVisible();

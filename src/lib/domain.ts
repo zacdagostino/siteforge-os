@@ -397,6 +397,7 @@ export type BuildManifest = {
 export type BuilderRunStatus =
   'queued' | 'running' | 'paused' | 'ready' | 'review_required' | 'failed' | 'cancelled';
 export type BuilderQualityStatus = 'passed' | 'needs_review' | 'failed' | 'not_run';
+export type BuilderRunMode = 'homepage_test' | 'page_test' | 'full_site';
 export type BuilderPreviewMode = 'ready' | 'draft';
 export type BuilderEventKind = 'stage' | 'activity' | 'file' | 'quality' | 'diagnostic' | 'error';
 
@@ -418,6 +419,8 @@ export type BuilderRun = {
   id: string;
   businessId: string;
   buildManifestId: string;
+  buildMode: BuilderRunMode;
+  targetSourceUrl?: string;
   status: BuilderRunStatus;
   templateVersion: string;
   model?: string;
@@ -544,6 +547,7 @@ export type Activity = {
 export type ProspectWorkspace = {
   business: Business;
   website?: Website;
+  captures: ResearchCapture[];
   contacts: Contact[];
   facts: EvidenceFact[];
   latestCapture?: ResearchCapture;
@@ -551,13 +555,17 @@ export type ProspectWorkspace = {
   artifacts: ResearchArtifact[];
   researchPacket?: ResearchPacket;
   assetAnalysis?: AssetAnalysisJob;
+  assetAnalysisJobs: AssetAnalysisJob[];
   assetRefresh?: AssetRefreshJob;
   assetAnnotations: AssetAnnotation[];
   brandColourEvidence: BrandColourEvidence[];
   brandKit?: BrandKit;
   redesignBrief?: RedesignBrief;
+  redesignBriefs: RedesignBrief[];
   buildManifest?: BuildManifest;
+  buildManifests: BuildManifest[];
   latestBuilderRun?: BuilderRun;
+  builderRuns: BuilderRun[];
   builderArtifacts: BuilderArtifact[];
   builderEvents: BuilderEvent[];
   previousCapture?: ResearchCapture;

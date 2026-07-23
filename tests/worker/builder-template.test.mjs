@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { cp, mkdtemp, rm, stat } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -25,6 +25,10 @@ test('builds the isolated static preview foundation', async () => {
     await runNode(['scripts/build.mjs'], directory);
     const output = await stat(join(directory, 'dist', 'index.html'));
     assert.equal(output.isFile(), true);
+    const runtime = await readFile(join(directory, 'dist', 'main.js'), 'utf8');
+    assert.match(runtime, /IntersectionObserver/);
+    assert.match(runtime, /prefers-reduced-motion/);
+    assert.match(runtime, /data-counter/);
     await assert.rejects(stat(join(directory, 'dist', 'assets', '.gitkeep')));
   } finally {
     await rm(directory, { recursive: true, force: true });

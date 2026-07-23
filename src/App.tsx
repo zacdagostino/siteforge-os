@@ -9,9 +9,13 @@ import {
   Clock3,
   ExternalLink,
   FilePenLine,
+  FileImage,
   FileText,
+  FolderTree,
+  FormInput,
   Globe2,
   ListChecks,
+  PackageCheck,
   Play,
   RotateCcw,
   Save,
@@ -59,6 +63,7 @@ import {
   type CapabilityDecision,
   type BriefSourceSelections,
   type BuilderPreviewMode,
+  type BuilderRunMode,
   type BuilderRun,
   type BuilderEvent,
   type CapturedPage,
@@ -88,8 +93,9 @@ type WorkspaceTab =
   | 'activity';
 type Route =
   | { page: 'today' }
+  | { page: 'data' }
   | { page: 'settings' }
-  | { page: 'prospects'; businessId?: string; tab?: WorkspaceTab };
+  | { page: 'prospects'; businessId?: string; versionId?: string; tab?: WorkspaceTab };
 
 const lastRouteStorageKey = 'siteforge-os.last-route';
 
@@ -99,7 +105,7 @@ const workspaceTabs: Array<{ id: WorkspaceTab; label: string }> = [
   { id: 'packet', label: 'Packet' },
   { id: 'assets', label: 'Assets' },
   { id: 'brief', label: 'Brief' },
-  { id: 'redesign', label: 'Redesign' },
+  { id: 'redesign', label: 'Build & preview' },
   { id: 'audit', label: 'Audit' },
   { id: 'report', label: 'Report' },
   { id: 'activity', label: 'Activity' },
@@ -115,17 +121,20 @@ function routeFromHash(hash: string): Route {
     return {
       page: 'prospects',
       businessId: parts[1],
-      tab: isWorkspaceTab(parts[2]) ? parts[2] : undefined,
+      versionId: parts[2] === 'versions' ? parts[3] : undefined,
+      tab: isWorkspaceTab(parts[2]) ? parts[2] : isWorkspaceTab(parts[4]) ? parts[4] : undefined,
     };
   }
   if (parts[0] === 'settings') return { page: 'settings' };
+  if (parts[0] === 'data') return { page: 'data' };
   return { page: 'today' };
 }
 
 function hrefForRoute(route: Route) {
   if (route.page === 'today') return '#/today';
   if (route.page === 'settings') return '#/settings';
-  return `#/prospects${route.businessId ? `/${route.businessId}${route.tab ? `/${route.tab}` : ''}` : ''}`;
+  if (route.page === 'data') return '#/data';
+  return `#/prospects${route.businessId ? `/${route.businessId}${route.versionId ? `/versions/${route.versionId}` : ''}${route.tab ? `/${route.tab}` : ''}` : ''}`;
 }
 
 function storedRouteHash() {
@@ -162,6 +171,16 @@ function formatDateTime(value: string) {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value));
+}
+
+function formatStorageSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function storedMetadataSize(value: unknown) {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
 function stageTone(stage: ProspectStage) {
@@ -596,12 +615,14 @@ function WorkspaceHeader({
   onBack,
   onApprove,
   onOpenSettings,
+  onVersionChange,
   settingsButtonRef,
 }: {
   workspace: ProspectWorkspace;
   onBack: () => void;
   onApprove: () => void;
   onOpenSettings: () => void;
+  onVersionChange?: (versionId: string) => void;
   settingsButtonRef: RefObject<HTMLButtonElement>;
 }) {
   const { business, website } = workspace;
@@ -613,27 +634,24 @@ function WorkspaceHeader({
         <ArrowLeft aria-hidden="true" size={16} /> All prospects
       </Button>
       <header className="workspace-header">
-        <div>
-          <div className="workspace-header__identity-row">
-            <BusinessIdentity
-              title
-              websiteDomain={website?.domain}
-              websiteUrl={website?.url}
-              workspace={workspace}
-            />
-            <div className="workspace-header__identity-actions">
-              <StatusPill stage={business.stage} />
-              <Button
-                aria-label="Open prospect settings"
-                className="workspace-header__settings-button"
-                onClick={onOpenSettings}
-                ref={settingsButtonRef}
-                size="compact"
-                variant="quiet"
-              >
-                <Settings aria-hidden="true" size={18} />
-              </Button>
-            </div>
+        <div className="workspace-header__identity-row">
+          <BusinessIdentity
+            title
+            websiteDomain={website?.domain}
+            websiteUrl={website?.url}
+            workspace={workspace}
+          />
+          <div className="workspace-header__identity-actions">
+            <Button
+              aria-label="Open prospect settings"
+              className="workspace-header__settings-button"
+              onClick={onOpenSettings}
+              ref={settingsButtonRef}
+              size="compact"
+              variant="quiet"
+            >
+              <Settings aria-hidden="true" size={18} />
+            </Button>
           </div>
         </div>
         {canApprove && !isApproved ? (
@@ -644,6 +662,22 @@ function WorkspaceHeader({
           </div>
         ) : null}
       </header>
+      {workspace.redesignBriefs.length > 1 ? (
+        <label className="workspace-version-picker">
+          <span>Workspace version</span>
+          <select
+            aria-label="Workspace version"
+            onChange={(event) => onVersionChange?.(event.target.value)}
+            value={workspace.redesignBrief?.id ?? ''}
+          >
+            {workspace.redesignBriefs.map((brief) => (
+              <option key={brief.id} value={brief.id}>
+                Version {brief.version} · {brief.status}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
       {(isApproved || canApprove) && (
         <div className="approval-note" role="status">
           <ShieldAlert aria-hidden="true" size={17} />
@@ -1093,42 +1127,6 @@ function ResearchCapturePanel({
 
       {capture ? (
         <>
-          <dl className="research-capture__details">
-            <div>
-              <dt>Scope</dt>
-              <dd>
-                {capture.scope === 'all_pages'
-                  ? 'Discoverable public pages'
-                  : capture.scope === 'key_pages'
-                    ? 'Key public pages'
-                    : 'Homepage only'}
-              </dd>
-            </div>
-            <div>
-              <dt>Requested</dt>
-              <dd>
-                <time dateTime={capture.requestedAt}>{formatDateTime(capture.requestedAt)}</time>
-              </dd>
-            </div>
-            <div>
-              <dt>Pages captured</dt>
-              <dd>{capture.capturedPageCount}</dd>
-            </div>
-            <div>
-              <dt>Artifacts saved</dt>
-              <dd>{workspace.artifacts.length}</dd>
-            </div>
-            <div>
-              <dt>Visual evidence</dt>
-              <dd>Deferred</dd>
-            </div>
-            {capture.currentUrl ? (
-              <div className="research-capture__current-url">
-                <dt>{capture.status === 'failed' ? 'Stopped at' : 'Working on'}</dt>
-                <dd title={capture.currentUrl}>{capture.currentUrl}</dd>
-              </div>
-            ) : null}
-          </dl>
           {isActive ? (
             <div className={`capture-progress capture-progress--${capture.status}`}>
               <div
@@ -1174,9 +1172,6 @@ function ResearchCapturePanel({
                 </div>
               ) : null}
             </dl>
-          ) : null}
-          {capture.status === 'ready' ? (
-            <AutomatedChecks artifacts={workspace.artifacts} pages={workspace.capturedPages} />
           ) : null}
         </>
       ) : (
@@ -1429,6 +1424,214 @@ function EvidenceLoadingState() {
           </div>
         ))}
       </div>
+    </section>
+  );
+}
+
+function CapturedSiteMap({
+  pages,
+  artifacts,
+  facts,
+  capture,
+}: {
+  pages: CapturedPage[];
+  artifacts: ResearchArtifact[];
+  facts: ProspectWorkspace['facts'];
+  capture?: ProspectWorkspace['latestCapture'];
+}) {
+  const [mapOpen, setMapOpen] = useState(false);
+  if (!pages.length) return null;
+  const pageGroups = new Map<string, CapturedPage[]>();
+  for (const page of pages) {
+    const segments = new URL(page.url).pathname.split('/').filter(Boolean);
+    const group = segments[0] ?? 'Home';
+    pageGroups.set(group, [...(pageGroups.get(group) ?? []), page]);
+  }
+  const orderedGroups = [...pageGroups.entries()].sort(([left], [right]) =>
+    left === 'Home' ? -1 : right === 'Home' ? 1 : left.localeCompare(right),
+  );
+  const assetCount = artifacts.filter((artifact) => artifact.kind === 'asset').length;
+  const formCount = pages.reduce(
+    (total, page) => total + metadataNumber(page.metadata, 'formCount'),
+    0,
+  );
+  const previewPages = pages.slice(0, 4);
+
+  return (
+    <section aria-labelledby="captured-site-map-title" className="captured-site-map">
+      <div className="captured-site-map__header">
+        <div>
+          <Eyebrow>Capture map</Eyebrow>
+          <h3 id="captured-site-map-title">Public site hierarchy and evidence</h3>
+          <p className="muted-copy">
+            An observed URL hierarchy from this capture. It is source evidence, not the proposed
+            redesign navigation.
+          </p>
+        </div>
+        <StatusBadge tone="neutral">{pages.length} pages observed</StatusBadge>
+      </div>
+      <dl className="research-summary__metrics">
+        <div>
+          <dt>Scope</dt>
+          <dd>
+            {capture?.scope === 'all_pages'
+              ? 'All public pages'
+              : capture?.scope === 'key_pages'
+                ? 'Key pages'
+                : 'Homepage'}
+          </dd>
+        </div>
+        <div>
+          <dt>Captured</dt>
+          <dd>
+            {capture ? (
+              <time dateTime={capture.requestedAt}>{formatDateTime(capture.requestedAt)}</time>
+            ) : (
+              '—'
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>Pages</dt>
+          <dd>{pages.length}</dd>
+        </div>
+        <div>
+          <dt>Forms</dt>
+          <dd>{formCount}</dd>
+        </div>
+        <div>
+          <dt>Images</dt>
+          <dd>{assetCount}</dd>
+        </div>
+        <div>
+          <dt>Facts</dt>
+          <dd>{facts.length}</dd>
+        </div>
+      </dl>
+      <button
+        aria-haspopup="dialog"
+        className="captured-site-map__preview"
+        onClick={() => setMapOpen(true)}
+        type="button"
+      >
+        <span className="captured-site-map__root">
+          <FolderTree aria-hidden="true" size={18} />
+          <span>{new URL(pages[0].url).hostname}</span>
+        </span>
+        <span className="captured-site-map__preview-list">
+          {previewPages.map((page) => {
+            const path = new URL(page.url).pathname || '/';
+            return <span key={page.id}>{path}</span>;
+          })}
+        </span>
+        <span className="captured-site-map__preview-action">
+          View full URL map ({pages.length} {pages.length === 1 ? 'page' : 'pages'})
+        </span>
+      </button>
+      <Dialog.Root onOpenChange={setMapOpen} open={mapOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="image-preview-overlay" />
+          <Dialog.Content className="captured-site-map__dialog">
+            <div className="captured-site-map__dialog-header">
+              <div>
+                <Dialog.Title>Full URL map</Dialog.Title>
+                <Dialog.Description>
+                  Captured public-page hierarchy and the source evidence available for review.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <Button aria-label="Close full URL map" size="compact" variant="quiet">
+                  <X aria-hidden="true" size={18} />
+                </Button>
+              </Dialog.Close>
+            </div>
+            <div className="captured-site-map__body">
+              <div className="captured-site-map__tree" aria-label="Captured URL hierarchy">
+                <div className="captured-site-map__root">
+                  <FolderTree aria-hidden="true" size={18} />
+                  <span>{new URL(pages[0].url).hostname}</span>
+                </div>
+                <ol>
+                  {orderedGroups.map(([group, groupPages]) => (
+                    <li key={group}>
+                      <details open={group === 'Home' || groupPages.length <= 4}>
+                        <summary>
+                          <span>{group === 'Home' ? '/' : `/${group}`}</span>
+                          <small>
+                            {groupPages.length} {groupPages.length === 1 ? 'page' : 'pages'}
+                          </small>
+                        </summary>
+                        <ul>
+                          {groupPages.map((page) => {
+                            const path = new URL(page.url).pathname || '/';
+                            return (
+                              <li key={page.id}>
+                                <a href={page.url} rel="noreferrer" target="_blank">
+                                  <span>{page.title || path}</span>
+                                  <small>{path}</small>
+                                </a>
+                                <StatusBadge
+                                  tone={
+                                    page.statusCode && page.statusCode < 400 ? 'success' : 'warning'
+                                  }
+                                >
+                                  {page.statusCode ?? '—'}
+                                </StatusBadge>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </details>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+              <div className="captured-site-map__legend">
+                <h4>What this capture contains</h4>
+                <ul>
+                  <li>
+                    <Globe2 aria-hidden="true" size={17} />
+                    <span>
+                      <b>Pages and paths</b>
+                      <small>
+                        Response, title, canonical URL, headings, navigation, and content structure.
+                      </small>
+                    </span>
+                  </li>
+                  <li>
+                    <FormInput aria-hidden="true" size={17} />
+                    <span>
+                      <b>Actions and forms</b>
+                      <small>
+                        Observed calls to action, forms, fields, and public contact signals.
+                      </small>
+                    </span>
+                  </li>
+                  <li>
+                    <FileImage aria-hidden="true" size={17} />
+                    <span>
+                      <b>Visual material</b>
+                      <small>
+                        Saved page images and optional responsive screenshots, grouped below by
+                        source page.
+                      </small>
+                    </span>
+                  </li>
+                  <li>
+                    <FileText aria-hidden="true" size={17} />
+                    <span>
+                      <b>Source records</b>
+                      <small>
+                        Private HTML, extracted text, metadata, and capture artifacts for review.
+                      </small>
+                    </span>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </section>
   );
 }
@@ -1692,100 +1895,6 @@ function groupScreenshotsByPage(artifacts: ResearchArtifact[]) {
     pages.set(sourceUrl, [...(pages.get(sourceUrl) ?? []), artifact]);
   });
   return [...pages.entries()];
-}
-
-function AutomatedChecks({
-  artifacts,
-  pages,
-}: {
-  artifacts: ResearchArtifact[];
-  pages: CapturedPage[];
-}) {
-  const pageCount = pages.length;
-  const successfulPages = pages.filter(
-    (page) => page.statusCode !== undefined && page.statusCode >= 200 && page.statusCode < 400,
-  ).length;
-  const forms = pages.reduce(
-    (total, page) => total + metadataNumber(page.metadata, 'formCount'),
-    0,
-  );
-  const imagesWithoutAlt = pages.reduce(
-    (total, page) => total + metadataNumber(page.metadata, 'imagesWithoutAlt'),
-    0,
-  );
-  const accessibilityViolations = artifacts
-    .filter((artifact) => artifact.kind === 'accessibility')
-    .reduce((total, artifact) => total + metadataNumber(artifact.metadata, 'violationCount'), 0);
-  const titledPages = pages.filter((page) => Boolean(page.title)).length;
-  const canonicalPages = pages.filter((page) => Boolean(page.canonicalUrl)).length;
-  const checks: Array<{ label: string; detail: string; tone: 'success' | 'warning' | 'neutral' }> =
-    [
-      {
-        label: 'Page responses',
-        detail: `${successfulPages} of ${pageCount} captured pages returned a successful response.`,
-        tone: successfulPages === pageCount ? 'success' : 'warning',
-      },
-      {
-        label: 'Document titles',
-        detail: `${titledPages} of ${pageCount} captured pages have a document title.`,
-        tone: titledPages === pageCount ? 'success' : 'warning',
-      },
-      {
-        label: 'Canonical URLs',
-        detail: `${canonicalPages} of ${pageCount} captured pages provide a canonical URL.`,
-        tone: canonicalPages === pageCount ? 'success' : 'warning',
-      },
-      {
-        label: 'Forms discovered',
-        detail: `${forms} ${forms === 1 ? 'form was' : 'forms were'} found across the captured pages.`,
-        tone: 'neutral',
-      },
-      {
-        label: 'Image alt text',
-        detail:
-          imagesWithoutAlt === 0
-            ? 'No images without alt text were found in the captured page markup.'
-            : `${imagesWithoutAlt} images do not have alt text in the captured page markup.`,
-        tone: imagesWithoutAlt === 0 ? 'success' : 'warning',
-      },
-      {
-        label: 'Automated accessibility rules',
-        detail:
-          accessibilityViolations === 0
-            ? 'No configured automated rule violations were found. This is not a complete accessibility audit.'
-            : `${accessibilityViolations} automated rule violations were found. Review them in the source files before drawing conclusions.`,
-        tone: accessibilityViolations === 0 ? 'success' : 'warning',
-      },
-    ];
-
-  return (
-    <section
-      aria-labelledby="automated-checks-title"
-      className="research-section research-section--checks"
-    >
-      <div>
-        <Eyebrow>Automated observations</Eyebrow>
-        <h3 id="automated-checks-title">Checks from this capture</h3>
-        <p className="muted-copy">
-          These are measured signals from the saved pages, not final audit findings or compliance
-          conclusions.
-        </p>
-      </div>
-      <ul className="automated-checks">
-        {checks.map((check) => (
-          <li key={check.label}>
-            <span>
-              <strong>{check.label}</strong>
-              <small>{check.detail}</small>
-            </span>
-            <StatusBadge tone={check.tone}>
-              {check.tone === 'success' ? 'Observed' : 'Check'}
-            </StatusBadge>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
 }
 
 function CaptureArtifacts({
@@ -3971,18 +4080,35 @@ function BuilderRunPanel({
   workspace,
   onRequestBuild,
   onCancelBuild,
+  onDeleteBuild,
   onOpenPreview,
 }: {
   workspace: ProspectWorkspace;
-  onRequestBuild: () => Promise<void>;
+  onRequestBuild: (mode: BuilderRunMode, targetSourceUrl?: string) => Promise<void>;
   onCancelBuild: () => Promise<void>;
+  onDeleteBuild: (businessId: string) => Promise<void>;
   onOpenPreview: (builderRunId: string, mode?: BuilderPreviewMode) => Promise<string>;
 }) {
   const run = workspace.latestBuilderRun;
   const [isRequesting, setIsRequesting] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [isOpeningPreview, setIsOpeningPreview] = useState(false);
   const [message, setMessage] = useState('');
+  const [targetSourceUrl, setTargetSourceUrl] = useState('');
+  const pageTestOptions = (workspace.buildManifest?.data.selectedPages ?? []).filter((page) => {
+    try {
+      return new URL(page.url).pathname.replace(/\/+$/, '') !== '';
+    } catch {
+      return false;
+    }
+  });
+  const homepageTestReady = workspace.builderRuns.some(
+    (candidate) =>
+      candidate.buildManifestId === workspace.buildManifest?.id &&
+      candidate.buildMode === 'homepage_test' &&
+      (candidate.status === 'ready' || candidate.status === 'review_required'),
+  );
   const screenshots = workspace.builderArtifacts.filter(
     (artifact) => artifact.kind === 'screenshot',
   );
@@ -4023,11 +4149,11 @@ function BuilderRunPanel({
   const failedDiagnostic =
     typeof run?.failureContext.detail === 'string' ? run.failureContext.detail : undefined;
 
-  async function requestBuild() {
+  async function requestBuild(mode: BuilderRunMode, targetSourceUrl?: string) {
     setIsRequesting(true);
     setMessage('');
     try {
-      await onRequestBuild();
+      await onRequestBuild(mode, targetSourceUrl);
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : 'The private preview could not be queued.',
@@ -4051,6 +4177,27 @@ function BuilderRunPanel({
     }
   }
 
+  async function deleteBuild() {
+    if (
+      !run ||
+      !window.confirm(
+        'Delete every private build attempt, draft, screenshot, log, and preview link for this prospect? Research and the Build Manifest are kept. This cannot be undone.',
+      )
+    )
+      return;
+    setIsDeleting(true);
+    setMessage('');
+    try {
+      await onDeleteBuild(workspace.business.id);
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : 'The private build could not be deleted.',
+      );
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   async function openPreview(mode: BuilderPreviewMode) {
     if (!run) return;
     const previewTab = window.open('about:blank', '_blank');
@@ -4062,7 +4209,11 @@ function BuilderRunPanel({
       if (previewTab && !previewTab.closed) {
         previewTab.location.replace(previewUrl);
       } else {
-        window.open(previewUrl, '_blank', 'noopener,noreferrer');
+        // A popup can be blocked in browser-hosted environments such as
+        // Codespaces. This runs after the asynchronous access-token request,
+        // so attempting a second popup would be blocked as well. Navigating
+        // the current tab keeps the private preview accessible.
+        window.location.assign(previewUrl);
       }
     } catch (error) {
       previewTab?.close();
@@ -4090,6 +4241,108 @@ function BuilderRunPanel({
         ) : null}
       </div>
 
+      <div className="brief-panel__actions">
+        {run?.status === 'ready' || run?.status === 'review_required' ? (
+          <Button
+            disabled={isOpeningPreview}
+            onClick={() => void openPreview('ready')}
+            type="button"
+          >
+            <ArrowUpRight aria-hidden="true" size={16} />
+            {isOpeningPreview ? 'Opening preview' : 'Open private preview'}
+          </Button>
+        ) : null}
+        {(run?.status === 'running' || frozenDraft) && draftAvailable ? (
+          <Button
+            disabled={isOpeningPreview}
+            onClick={() => void openPreview('draft')}
+            type="button"
+            variant="secondary"
+          >
+            <ArrowUpRight aria-hidden="true" size={16} />
+            {isOpeningPreview
+              ? 'Opening draft'
+              : frozenDraft
+                ? 'Open frozen draft'
+                : 'View working draft'}
+          </Button>
+        ) : null}
+        {active ? (
+          <Button
+            disabled={isCancelling || Boolean(run?.cancelRequestedAt)}
+            onClick={() => void cancelBuild()}
+            type="button"
+            variant="secondary"
+          >
+            <Ban aria-hidden="true" size={16} />
+            {isCancelling ? 'Cancelling build' : 'Cancel build'}
+          </Button>
+        ) : (
+          <>
+            <Button
+              disabled={isRequesting}
+              onClick={() => void requestBuild('homepage_test')}
+              type="button"
+              variant="secondary"
+            >
+              <Play aria-hidden="true" size={16} />
+              {isRequesting ? 'Queueing builder' : 'Test homepage'}
+            </Button>
+            {pageTestOptions.length ? (
+              <div className="builder-page-test">
+                <label>
+                  <span>Test one approved page</span>
+                  <select
+                    aria-label="Page to test"
+                    disabled={isRequesting || !homepageTestReady}
+                    onChange={(event) => setTargetSourceUrl(event.target.value)}
+                    value={targetSourceUrl}
+                  >
+                    <option value="">Choose a page</option>
+                    {pageTestOptions.map((page) => (
+                      <option key={page.url} value={page.url}>
+                        {page.title || new URL(page.url).pathname}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <Button
+                  disabled={isRequesting || !homepageTestReady || !targetSourceUrl}
+                  onClick={() => void requestBuild('page_test', targetSourceUrl)}
+                  type="button"
+                  variant="secondary"
+                >
+                  <Play aria-hidden="true" size={16} />
+                  {isRequesting ? 'Queueing builder' : 'Test selected page'}
+                </Button>
+                {!homepageTestReady ? (
+                  <small>Complete a homepage test before testing another page.</small>
+                ) : null}
+              </div>
+            ) : null}
+            <Button
+              disabled={isRequesting}
+              onClick={() => void requestBuild('full_site')}
+              type="button"
+            >
+              <Play aria-hidden="true" size={16} />
+              {isRequesting ? 'Queueing builder' : 'Continue developing'}
+            </Button>
+          </>
+        )}
+        {run && !active ? (
+          <Button
+            disabled={isDeleting}
+            onClick={() => void deleteBuild()}
+            type="button"
+            variant="quiet"
+          >
+            <Trash2 aria-hidden="true" size={16} />
+            {isDeleting ? 'Deleting builds' : 'Delete all builds'}
+          </Button>
+        ) : null}
+      </div>
+
       {run ? (
         <>
           {run.status === 'failed' ? (
@@ -4101,7 +4354,7 @@ function BuilderRunPanel({
               <div>
                 <dt>Progress saved</dt>
                 <dd>
-                  {run.completedItems} of {run.totalItems || 7} steps
+                  {run.totalItems > 0 ? `${run.completedItems} of ${run.totalItems} steps` : '—'}
                 </dd>
               </div>
             </dl>
@@ -4113,9 +4366,7 @@ function BuilderRunPanel({
               </div>
               <div>
                 <dt>Completed steps</dt>
-                <dd>
-                  {run.completedItems}/{run.totalItems || 7}
-                </dd>
+                <dd>{run.totalItems > 0 ? `${run.completedItems}/${run.totalItems}` : '—'}</dd>
               </div>
               <div>
                 <dt>Quality status</dt>
@@ -4389,59 +4640,6 @@ function BuilderRunPanel({
         <p className="muted-copy">No website has been generated from this manifest yet.</p>
       )}
 
-      <div className="brief-panel__actions">
-        {run?.status === 'ready' || run?.status === 'review_required' ? (
-          <Button
-            disabled={isOpeningPreview}
-            onClick={() => void openPreview('ready')}
-            type="button"
-          >
-            <ArrowUpRight aria-hidden="true" size={16} />
-            {isOpeningPreview ? 'Opening preview' : 'Open private preview'}
-          </Button>
-        ) : null}
-        {(run?.status === 'running' || frozenDraft) && draftAvailable ? (
-          <Button
-            disabled={isOpeningPreview}
-            onClick={() => void openPreview('draft')}
-            type="button"
-            variant="secondary"
-          >
-            <ArrowUpRight aria-hidden="true" size={16} />
-            {isOpeningPreview
-              ? 'Opening draft'
-              : frozenDraft
-                ? 'Open frozen draft'
-                : 'View working draft'}
-          </Button>
-        ) : null}
-        {active ? (
-          <Button
-            disabled={isCancelling || Boolean(run?.cancelRequestedAt)}
-            onClick={() => void cancelBuild()}
-            type="button"
-            variant="secondary"
-          >
-            <Ban aria-hidden="true" size={16} />
-            {isCancelling ? 'Cancelling build' : 'Cancel build'}
-          </Button>
-        ) : (
-          <Button disabled={isRequesting} onClick={() => void requestBuild()} type="button">
-            <Play aria-hidden="true" size={16} />
-            {isRequesting
-              ? 'Queueing builder'
-              : run?.status === 'failed' || run?.status === 'cancelled'
-                ? checkpointAvailable
-                  ? 'Resume from checkpoint'
-                  : savedSourceAvailable
-                    ? 'Resume saved source'
-                    : 'Start clean rebuild'
-                : run
-                  ? 'Generate another preview'
-                  : 'Generate private preview'}
-          </Button>
-        )}
-      </div>
       {message ? (
         <p className="form-message form-message--error" role="alert">
           {message}
@@ -4451,12 +4649,30 @@ function BuilderRunPanel({
   );
 }
 
-function BuilderSettingsControl({ compact = false }: { compact?: boolean }) {
+function BuilderSettingsControl({
+  compact = false,
+  iconOnly = false,
+}: {
+  compact?: boolean;
+  iconOnly?: boolean;
+}) {
   return (
     <Dialog.Root>
       <Dialog.Trigger asChild>
-        <Button size={compact ? 'compact' : 'default'} type="button" variant="secondary">
-          <SlidersHorizontal aria-hidden="true" size={16} /> Builder settings
+        <Button
+          aria-label={iconOnly ? 'Builder settings' : undefined}
+          size={compact || iconOnly ? 'compact' : 'default'}
+          title={iconOnly ? 'Builder settings' : undefined}
+          type="button"
+          variant="secondary"
+        >
+          {iconOnly ? (
+            <Settings aria-hidden="true" size={18} />
+          ) : (
+            <>
+              <SlidersHorizontal aria-hidden="true" size={16} /> Builder settings
+            </>
+          )}
         </Button>
       </Dialog.Trigger>
       <Dialog.Portal>
@@ -4515,6 +4731,324 @@ function BuilderSettingsControl({ compact = false }: { compact?: boolean }) {
   );
 }
 
+type ManagedRecordKind = 'capture' | 'asset_analysis' | 'brief' | 'manifest' | 'build';
+
+type ManagedRecord = {
+  id: string;
+  kind: ManagedRecordKind;
+  label: string;
+  date: string;
+  size: number;
+  sizeIsEstimated?: boolean;
+  tab: WorkspaceTab;
+  versionId?: string;
+  workspace: ProspectWorkspace;
+};
+
+function DataManagementPanel({
+  workspaces,
+  onOpen,
+  onDelete,
+  onDeletePackage,
+}: {
+  workspaces: ProspectWorkspace[];
+  onOpen: (workspace: ProspectWorkspace, tab: WorkspaceTab, versionId?: string) => void;
+  onDelete: (kind: ManagedRecordKind, id: string) => Promise<void>;
+  onDeletePackage: (businessId: string, redesignBriefId: string) => Promise<void>;
+}) {
+  const [pending, setPending] = useState<{
+    kind: ManagedRecordKind;
+    id: string;
+    name: string;
+  }>();
+  const [pendingPackage, setPendingPackage] = useState<{
+    businessId: string;
+    redesignBriefId: string;
+    name: string;
+    recordCount: number;
+  }>();
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [error, setError] = useState('');
+  const [selected, setSelected] = useState<ManagedRecord>();
+  const records = workspaces.flatMap((workspace) => {
+    const entries: Array<Omit<ManagedRecord, 'workspace'>> = [];
+    for (const capture of workspace.captures) {
+      entries.push({
+        id: capture.id,
+        kind: 'capture',
+        label: `Capture · ${capture.status}`,
+        date: capture.requestedAt,
+        size: workspace.artifacts
+          .filter((artifact) => artifact.crawlRunId === capture.id)
+          .reduce((total, artifact) => total + (artifact.byteSize ?? 0), 0),
+        tab: 'research',
+      });
+    }
+    for (const analysis of workspace.assetAnalysisJobs) {
+      entries.push({
+        id: analysis.id,
+        kind: 'asset_analysis',
+        label: `Asset analysis · ${analysis.status}`,
+        date: analysis.createdAt,
+        size: workspace.artifacts
+          .filter(
+            (artifact) => artifact.kind === 'asset' && artifact.crawlRunId === analysis.crawlRunId,
+          )
+          .reduce((total, artifact) => total + (artifact.byteSize ?? 0), 0),
+        tab: 'assets',
+      });
+    }
+    for (const brief of workspace.redesignBriefs) {
+      entries.push({
+        id: brief.id,
+        kind: 'brief',
+        label: `Brief v${brief.version} · ${brief.status}`,
+        date: brief.updatedAt,
+        size: storedMetadataSize(brief),
+        sizeIsEstimated: true,
+        tab: 'brief',
+        versionId: brief.id,
+      });
+    }
+    for (const manifest of workspace.buildManifests) {
+      const brief = workspace.redesignBriefs.find((item) => item.id === manifest.redesignBriefId);
+      entries.push({
+        id: manifest.id,
+        kind: 'manifest',
+        label: `Build Manifest${brief ? ` · Version ${brief.version}` : ''}`,
+        date: manifest.generatedAt,
+        size: storedMetadataSize(manifest),
+        sizeIsEstimated: true,
+        tab: 'redesign',
+        versionId: manifest.redesignBriefId,
+      });
+    }
+    for (const run of workspace.builderRuns) {
+      const manifest = workspace.buildManifests.find((item) => item.id === run.buildManifestId);
+      entries.push({
+        id: run.id,
+        kind: 'build',
+        label: `Build · ${run.status}`,
+        date: run.updatedAt,
+        size: workspace.builderArtifacts.reduce(
+          (total, artifact) => total + (artifact.byteSize ?? 0),
+          0,
+        ),
+        tab: 'redesign',
+        versionId: manifest?.redesignBriefId,
+      });
+    }
+    return entries.map((entry) => ({ ...entry, workspace }));
+  });
+  const recordGroups = records.reduce<Map<string, ManagedRecord[]>>((groups, record) => {
+    const key = `${record.workspace.business.id}:${record.versionId ?? record.id}`;
+    groups.set(key, [...(groups.get(key) ?? []), record]);
+    return groups;
+  }, new Map());
+
+  async function confirmDelete() {
+    if (!pending && !pendingPackage) return;
+    setIsDeleting(true);
+    setError('');
+    try {
+      if (pendingPackage) {
+        await onDeletePackage(pendingPackage.businessId, pendingPackage.redesignBriefId);
+      } else if (pending) {
+        await onDelete(pending.kind, pending.id);
+      }
+      setPending(undefined);
+      setPendingPackage(undefined);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? `${caught.message} Delete dependent builds, manifests, or briefs first.`
+          : 'This record has dependent data. Delete those records first.',
+      );
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
+  return (
+    <section className="workspace-panel data-management" aria-labelledby="data-management-title">
+      <div>
+        <Eyebrow>Saved workspace data</Eyebrow>
+        <h2 id="data-management-title">Data management</h2>
+        <p className="muted-copy">
+          Open a record in its prospect workspace or delete it permanently. Source records stay
+          protected while a brief, manifest, or build still depends on them.
+        </p>
+      </div>
+      {records.length ? (
+        <div className="data-management__list">
+          {[...recordGroups.values()].map((group) => (
+            <section
+              className="data-management__group"
+              key={`${group[0].workspace.business.id}-${group[0].versionId ?? group[0].id}`}
+            >
+              <div className="data-management__group-title">
+                <div>
+                  <strong>{group[0].workspace.business.name}</strong>
+                  <span>
+                    {group[0].versionId
+                      ? `Build package · Brief v${group.find((item) => item.kind === 'brief')?.label.match(/v(\d+)/)?.[1] ?? 'workspace'} · ${group.length} linked records`
+                      : 'Source records'}
+                  </span>
+                </div>
+                {group[0].versionId ? (
+                  <Button
+                    onClick={() =>
+                      setPendingPackage({
+                        businessId: group[0].workspace.business.id,
+                        redesignBriefId: group[0].versionId!,
+                        name: `${group[0].workspace.business.name} build package`,
+                        recordCount: group.length,
+                      })
+                    }
+                    size="compact"
+                    variant="quiet"
+                  >
+                    <Trash2 aria-hidden="true" size={16} /> Delete package
+                  </Button>
+                ) : null}
+              </div>
+              {group.map((record) => (
+                <div className="data-management__record" key={`${record.kind}-${record.id}`}>
+                  <div>
+                    <strong>{record.workspace.business.name}</strong>
+                    <span>{record.label}</span>
+                    <small>Saved {formatDateTime(record.date)}</small>
+                  </div>
+                  <div className="data-management__actions">
+                    <span className="data-management__size">
+                      {record.sizeIsEstimated ? 'Metadata ' : ''}
+                      {formatStorageSize(record.size)}
+                    </span>
+                    <Button onClick={() => setSelected(record)} size="compact" variant="secondary">
+                      Open <ArrowUpRight aria-hidden="true" size={15} />
+                    </Button>
+                    <Button
+                      aria-label={`Delete ${record.label} for ${record.workspace.business.name}`}
+                      className="data-management__delete"
+                      onClick={() =>
+                        setPending({ kind: record.kind, id: record.id, name: record.label })
+                      }
+                      size="compact"
+                      title={`Delete ${record.label}`}
+                      variant="quiet"
+                    >
+                      <Trash2 aria-hidden="true" size={17} />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </section>
+          ))}
+        </div>
+      ) : (
+        <p className="muted-copy">No saved captures, analyses, briefs, manifests, or builds yet.</p>
+      )}
+      <ConfirmationDialog
+        confirmLabel="Delete permanently"
+        detail={
+          pendingPackage
+            ? `Delete ${pendingPackage.name}, including its brief, Build Manifest, ${pendingPackage.recordCount} linked records, and any private build output? This cannot be undone.`
+            : `Delete ${pending?.name ?? 'this record'} permanently? This cannot be undone.`
+        }
+        error={error}
+        isConfirming={isDeleting}
+        onConfirm={() => void confirmDelete()}
+        onOpenChange={(open) => {
+          if (!open && !isDeleting) {
+            setPending(undefined);
+            setPendingPackage(undefined);
+            setError('');
+          }
+        }}
+        open={Boolean(pending || pendingPackage)}
+        title={pendingPackage ? 'Delete build package' : 'Delete saved record'}
+      />
+      <Dialog.Root
+        onOpenChange={(open) => !open && setSelected(undefined)}
+        open={Boolean(selected)}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="builder-settings-overlay" />
+          <Dialog.Content className="data-record-dialog">
+            <div className="data-record-dialog__header">
+              <div>
+                <Eyebrow>Saved record</Eyebrow>
+                <Dialog.Title>{selected?.label}</Dialog.Title>
+                <Dialog.Description>{selected?.workspace.business.name}</Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <Button aria-label="Close record details" size="compact" variant="quiet">
+                  <X aria-hidden="true" size={18} />
+                </Button>
+              </Dialog.Close>
+            </div>
+            <dl className="data-record-dialog__details">
+              <div>
+                <dt>Prospect</dt>
+                <dd>{selected?.workspace.business.name}</dd>
+              </div>
+              <div>
+                <dt>Saved</dt>
+                <dd>{selected ? formatDateTime(selected.date) : '—'}</dd>
+              </div>
+              <div>
+                <dt>Storage</dt>
+                <dd>
+                  {selected?.sizeIsEstimated ? 'Metadata ' : ''}
+                  {selected ? formatStorageSize(selected.size) : '—'}
+                </dd>
+              </div>
+            </dl>
+            <div className="data-record-dialog__actions">
+              <Dialog.Close asChild>
+                <Button variant="secondary">Close</Button>
+              </Dialog.Close>
+              <Button
+                onClick={() => {
+                  if (selected) onOpen(selected.workspace, selected.tab, selected.versionId);
+                }}
+                variant="primary"
+              >
+                Open prospect <ArrowUpRight aria-hidden="true" size={16} />
+              </Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </section>
+  );
+}
+
+function DataManagementPage({
+  workspaces,
+  onOpenWorkspace,
+  onDeleteRecord,
+  onDeletePackage,
+}: {
+  workspaces: ProspectWorkspace[];
+  onOpenWorkspace: (workspace: ProspectWorkspace, tab: WorkspaceTab, versionId?: string) => void;
+  onDeleteRecord: (kind: ManagedRecordKind, id: string) => Promise<void>;
+  onDeletePackage: (businessId: string, redesignBriefId: string) => Promise<void>;
+}) {
+  return (
+    <section className="settings-page" aria-labelledby="data-page-title">
+      <Eyebrow>Workspace records</Eyebrow>
+      <h1 id="data-page-title">Data</h1>
+      <DataManagementPanel
+        onDelete={onDeleteRecord}
+        onDeletePackage={onDeletePackage}
+        onOpen={onOpenWorkspace}
+        workspaces={workspaces}
+      />
+    </section>
+  );
+}
+
 function BuilderSettingsPage() {
   return (
     <section className="settings-page" aria-labelledby="settings-page-title">
@@ -4539,15 +5073,18 @@ function BuildManifestPanel({
   onCreate,
   onRequestBuild,
   onCancelBuild,
+  onDeleteBuild,
   onOpenPreview,
 }: {
   workspace: ProspectWorkspace;
   onCreate: () => Promise<void>;
-  onRequestBuild: () => Promise<void>;
+  onRequestBuild: (mode: BuilderRunMode, targetSourceUrl?: string) => Promise<void>;
   onCancelBuild: () => Promise<void>;
+  onDeleteBuild: (businessId: string) => Promise<void>;
   onOpenPreview: (builderRunId: string, mode?: BuilderPreviewMode) => Promise<string>;
 }) {
   const [isPreparing, setIsPreparing] = useState(false);
+  const [isManifestOpen, setIsManifestOpen] = useState(false);
   const [message, setMessage] = useState('');
   const brief = workspace.redesignBrief;
   const manifest = workspace.buildManifest;
@@ -4621,82 +5158,144 @@ function BuildManifestPanel({
 
   return (
     <Card className="workspace-panel brief-panel">
-      <div className="brief-panel__header">
-        <div>
+      <div className="brief-panel__header builder-handoff__header">
+        <div className="builder-handoff__topline">
           <Eyebrow>Builder handoff</Eyebrow>
+          <div className="builder-handoff__actions">
+            <StatusBadge tone="success">Ready for builder</StatusBadge>
+            <BuilderSettingsControl iconOnly />
+          </div>
+        </div>
+        <div>
           <h2>Build Manifest ready</h2>
           <p className="muted-copy">
-            Versioned private input for the future Codex website builder. No website has been
-            generated, published, or sent to the prospect.
+            Approved brief v{brief.version} is the permissioned input for every private preview:
+            {` ${permittedFactCount}`} permitted facts, {selectedPageCount} selected pages, and{' '}
+            {selectedAssetCount} source assets.
           </p>
         </div>
-        <StatusBadge tone="success">Ready for builder</StatusBadge>
       </div>
 
-      <dl className="build-manifest-summary" aria-label="Build Manifest contents">
-        <div>
-          <dt>Permitted facts</dt>
-          <dd>{permittedFactCount}</dd>
-        </div>
-        <div>
-          <dt>Selected pages</dt>
-          <dd>{selectedPageCount}</dd>
-        </div>
-        <div>
-          <dt>Source assets</dt>
-          <dd>{selectedAssetCount}</dd>
-        </div>
-        <div>
-          <dt>Approved reuse assets</dt>
-          <dd>{approvedAssetCount}</dd>
-        </div>
-      </dl>
+      <Dialog.Root onOpenChange={setIsManifestOpen} open={isManifestOpen}>
+        <Dialog.Trigger asChild>
+          <button aria-haspopup="dialog" className="build-manifest-package" type="button">
+            <span className="build-manifest-package__heading">
+              <PackageCheck aria-hidden="true" size={22} />
+              <span>
+                <span className="build-manifest-package__eyebrow">Immutable build package</span>
+                <strong>Approved and ready for the builder</strong>
+              </span>
+              <span className="build-manifest-package__action">Open package</span>
+            </span>
+            <span className="build-manifest-summary" aria-label="Build Manifest contents">
+              <span>
+                <span>Permitted facts</span>
+                <strong>{permittedFactCount}</strong>
+              </span>
+              <span>
+                <span>Selected pages</span>
+                <strong>{selectedPageCount}</strong>
+              </span>
+              <span>
+                <span>Source assets</span>
+                <strong>{selectedAssetCount}</strong>
+              </span>
+              <span>
+                <span>Approved reuse assets</span>
+                <strong>{approvedAssetCount}</strong>
+              </span>
+            </span>
+          </button>
+        </Dialog.Trigger>
+        <Dialog.Portal>
+          <Dialog.Overlay className="image-preview-overlay" />
+          <Dialog.Content
+            aria-describedby="build-manifest-dialog-description"
+            className="build-manifest-dialog"
+          >
+            <div className="build-manifest-dialog__header">
+              <div>
+                <Eyebrow>Immutable build package</Eyebrow>
+                <Dialog.Title>Build Manifest ready</Dialog.Title>
+                <Dialog.Description id="build-manifest-dialog-description">
+                  Approved brief v{brief.version} is the permissioned input for every private
+                  preview created from this package.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <Button
+                  aria-label="Close Build Manifest"
+                  size="compact"
+                  type="button"
+                  variant="quiet"
+                >
+                  <X aria-hidden="true" size={18} />
+                </Button>
+              </Dialog.Close>
+            </div>
+            <dl className="build-manifest-summary" aria-label="Build Manifest contents">
+              <div>
+                <dt>Permitted facts</dt>
+                <dd>{permittedFactCount}</dd>
+              </div>
+              <div>
+                <dt>Selected pages</dt>
+                <dd>{selectedPageCount}</dd>
+              </div>
+              <div>
+                <dt>Source assets</dt>
+                <dd>{selectedAssetCount}</dd>
+              </div>
+              <div>
+                <dt>Approved reuse assets</dt>
+                <dd>{approvedAssetCount}</dd>
+              </div>
+            </dl>
+            <section className="build-manifest-dialog__section">
+              <h3>Approved source context</h3>
+              <p>
+                This immutable handoff links the approved brief, captured research, and permitted
+                asset guidance to this build. It is the source of truth for every run below.
+              </p>
+            </section>
+            <section className="build-manifest-dialog__section">
+              <h3>What the builder may use</h3>
+              <ul>
+                <li>Permitted facts remain tied to their original captured evidence.</li>
+                <li>
+                  Selected pages and assets are research context, not visual instructions to copy.
+                </li>
+                <li>
+                  Only the {approvedAssetCount} human-approved asset guidance record
+                  {approvedAssetCount === 1 ? '' : 's'} authorise visual reuse.
+                </li>
+                <li>
+                  {openQuestionCount + uncertaintyCount} open question
+                  {openQuestionCount + uncertaintyCount === 1 ? '' : 's'} or uncertaint
+                  {openQuestionCount + uncertaintyCount === 1 ? 'y' : 'ies'} remain for human
+                  review.
+                </li>
+              </ul>
+            </section>
+            <section className="build-manifest-dialog__section">
+              <h3>Private preview rules</h3>
+              <p>
+                Contract {manifest.builderContractVersion}. The builder can generate a private
+                preview when ready, but sharing still requires further approval.
+              </p>
+              <ul>
+                {Array.isArray(data.builderRules)
+                  ? data.builderRules.map((rule) => <li key={rule}>{rule}</li>)
+                  : null}
+              </ul>
+            </section>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
-      <details className="build-manifest-disclosure build-manifest-boundaries">
-        <summary>
-          <span className="build-manifest-disclosure__copy">
-            <span className="build-manifest-disclosure__eyebrow">Boundaries</span>
-            <span className="build-manifest-disclosure__title">What the builder may use</span>
-          </span>
-          <span className="build-manifest-disclosure__action">View safeguards</span>
-        </summary>
-        <ul>
-          <li>Permitted facts remain tied to their original captured evidence.</li>
-          <li>Selected pages and assets are research context, not visual instructions to copy.</li>
-          <li>
-            Only the {approvedAssetCount} human-approved asset guidance record
-            {approvedAssetCount === 1 ? '' : 's'} authorise visual reuse.
-          </li>
-          <li>
-            {openQuestionCount + uncertaintyCount} open question
-            {openQuestionCount + uncertaintyCount === 1 ? '' : 's'} or uncertaint
-            {openQuestionCount + uncertaintyCount === 1 ? 'y' : 'ies'} remain for human review.
-          </li>
-        </ul>
-      </details>
-
-      <details className="build-manifest-disclosure build-manifest-contract">
-        <summary>
-          <span className="build-manifest-disclosure__copy">
-            <span className="build-manifest-disclosure__eyebrow">Builder contract</span>
-            <span className="build-manifest-disclosure__title">Private preview rules</span>
-          </span>
-          <span className="build-manifest-disclosure__action">View contract</span>
-        </summary>
-        <div className="build-manifest-contract__content">
-          <p>
-            Contract {manifest.builderContractVersion}. The builder can generate a private preview
-            when ready, but sharing still requires further approval.
-          </p>
-          <ul>
-            {Array.isArray(data.builderRules)
-              ? data.builderRules.map((rule) => <li key={rule}>{rule}</li>)
-              : null}
-          </ul>
-        </div>
-      </details>
       <BuilderRunPanel
         onCancelBuild={onCancelBuild}
+        onDeleteBuild={onDeleteBuild}
         onOpenPreview={onOpenPreview}
         onRequestBuild={onRequestBuild}
         workspace={workspace}
@@ -5134,6 +5733,7 @@ function WorkspaceContent({
   createBuildManifest,
   requestWebsiteBuild,
   cancelWebsiteBuild,
+  deleteWebsiteBuild,
   createBuilderPreviewUrl,
   approveAllAuditFindings,
   updateAuditFinding,
@@ -5171,8 +5771,9 @@ function WorkspaceContent({
   ) => Promise<void>;
   approveRedesignBrief: (brief: RedesignBrief) => Promise<void>;
   createBuildManifest: () => Promise<void>;
-  requestWebsiteBuild: () => Promise<void>;
+  requestWebsiteBuild: (mode: BuilderRunMode, targetSourceUrl?: string) => Promise<void>;
   cancelWebsiteBuild: () => Promise<void>;
+  deleteWebsiteBuild: (businessId: string) => Promise<void>;
   createBuilderPreviewUrl: (builderRunId: string, mode?: BuilderPreviewMode) => Promise<string>;
   approveAllAuditFindings: () => Promise<void>;
   updateAuditFinding: (
@@ -5221,18 +5822,18 @@ function WorkspaceContent({
       workspace.latestCapture?.status === 'cancelled';
     return (
       <Card className="workspace-panel">
-        <Eyebrow>Website research</Eyebrow>
-        <h2>Captured website dossier</h2>
-        <p className="muted-copy">
-          Direct observations are saved with their page and capture time. Only uncertain information
-          and decisions that leave this workspace need human approval.
-        </p>
         <ResearchCapturePanel
           onCancelCapture={cancelResearchCapture}
           onContinueCapture={continueResearchCapture}
           onRequestCapture={requestResearchCapture}
           onRequestAssetRefresh={requestAssetRefresh}
           workspace={workspace}
+        />
+        <CapturedSiteMap
+          artifacts={workspace.artifacts}
+          capture={workspace.latestCapture}
+          facts={workspace.facts}
+          pages={workspace.capturedPages}
         />
         <PageInventory
           assets={workspace.artifacts.filter((artifact) => artifact.kind === 'asset')}
@@ -5342,18 +5943,9 @@ function WorkspaceContent({
   if (tab === 'redesign') {
     return (
       <div className="workspace-content-stack">
-        <section className="builder-settings-entry" aria-labelledby="builder-settings-entry-title">
-          <div>
-            <Eyebrow>Website builder</Eyebrow>
-            <h2 id="builder-settings-entry-title">Builder settings</h2>
-            <p className="muted-copy">
-              Review the protected Codex runtime before requesting a private preview.
-            </p>
-          </div>
-          <BuilderSettingsControl />
-        </section>
         <BuildManifestPanel
           onCancelBuild={cancelWebsiteBuild}
+          onDeleteBuild={deleteWebsiteBuild}
           onCreate={createBuildManifest}
           onOpenPreview={createBuilderPreviewUrl}
           onRequestBuild={requestWebsiteBuild}
@@ -5437,9 +6029,11 @@ function WorkspacePage({
   onCreateBuildManifest,
   onRequestWebsiteBuild,
   onCancelWebsiteBuild,
+  onDeleteWebsiteBuild,
   onCreateBuilderPreviewUrl,
   onApproveAllAuditFindings,
   onUpdateAuditFinding,
+  onVersionChange,
   tab,
   onTabChange,
 }: {
@@ -5478,8 +6072,9 @@ function WorkspacePage({
   ) => Promise<void>;
   onApproveRedesignBrief: (brief: RedesignBrief) => Promise<void>;
   onCreateBuildManifest: () => Promise<void>;
-  onRequestWebsiteBuild: () => Promise<void>;
+  onRequestWebsiteBuild: (mode: BuilderRunMode, targetSourceUrl?: string) => Promise<void>;
   onCancelWebsiteBuild: () => Promise<void>;
+  onDeleteWebsiteBuild: (businessId: string) => Promise<void>;
   onCreateBuilderPreviewUrl: (builderRunId: string) => Promise<string>;
   onApproveAllAuditFindings: () => Promise<void>;
   onUpdateAuditFinding: (
@@ -5488,6 +6083,7 @@ function WorkspacePage({
   ) => Promise<void>;
   tab: WorkspaceTab;
   onTabChange: (tab: WorkspaceTab) => void;
+  onVersionChange?: (versionId: string) => void;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
@@ -5503,6 +6099,7 @@ function WorkspacePage({
         onApprove={onApprove}
         onBack={onBack}
         onOpenSettings={() => setSettingsOpen(true)}
+        onVersionChange={onVersionChange}
         settingsButtonRef={settingsButtonRef}
         workspace={workspace}
       />
@@ -5541,6 +6138,7 @@ function WorkspacePage({
           createBuildManifest={onCreateBuildManifest}
           requestWebsiteBuild={onRequestWebsiteBuild}
           cancelWebsiteBuild={onCancelWebsiteBuild}
+          deleteWebsiteBuild={onDeleteWebsiteBuild}
           createBuilderPreviewUrl={onCreateBuilderPreviewUrl}
           requestAssetAnalysis={onRequestAssetAnalysis}
           cancelAssetAnalysis={onCancelAssetAnalysis}
@@ -5746,10 +6344,31 @@ function WorkspaceApp({
     };
   }, [loading, refreshData]);
 
-  const workspace =
+  const baseWorkspace =
     route.page === 'prospects' && route.businessId
       ? workspaces.find((candidate) => candidate.business.id === route.businessId)
       : undefined;
+  const workspace =
+    baseWorkspace && route.page === 'prospects' && route.versionId
+      ? (() => {
+          const brief = baseWorkspace.redesignBriefs.find((item) => item.id === route.versionId);
+          if (!brief) return baseWorkspace;
+          const manifest = baseWorkspace.buildManifests.find(
+            (item) => item.redesignBriefId === brief.id,
+          );
+          const run = manifest
+            ? baseWorkspace.builderRuns.find((item) => item.buildManifestId === manifest.id)
+            : undefined;
+          const capture = baseWorkspace.captures.find((item) => item.id === brief.crawlRunId);
+          return {
+            ...baseWorkspace,
+            latestCapture: capture,
+            redesignBrief: brief,
+            buildManifest: manifest,
+            latestBuilderRun: run,
+          };
+        })()
+      : baseWorkspace;
 
   const activeCapture = captureIsActive(workspace?.latestCapture);
   const activeAudit =
@@ -6064,11 +6683,13 @@ function WorkspaceApp({
     });
   }
 
-  async function requestWebsiteBuild() {
+  async function requestWebsiteBuild(mode: BuilderRunMode, targetSourceUrl?: string) {
     if (!workspace) return;
     const resumeRun =
       (workspace.latestBuilderRun?.status === 'failed' ||
         workspace.latestBuilderRun?.status === 'cancelled') &&
+      workspace.latestBuilderRun?.buildMode === mode &&
+      workspace.latestBuilderRun?.targetSourceUrl === targetSourceUrl &&
       workspace.builderArtifacts.some(
         (artifact) =>
           (artifact.kind === 'checkpoint' &&
@@ -6079,15 +6700,25 @@ function WorkspaceApp({
         : undefined;
     const run = resumeRun
       ? await repository.resumeWebsiteBuild(resumeRun.id)
-      : await repository.requestWebsiteBuild(workspace.business.id);
+      : await repository.requestWebsiteBuild(workspace.business.id, mode, targetSourceUrl);
     if (!run) throw new Error('The private preview could not be queued.');
     await refreshData();
     setNotice({
       id: crypto.randomUUID(),
-      title: resumeRun ? 'Private preview resuming' : 'Private preview queued',
+      title: resumeRun
+        ? 'Private preview resuming'
+        : mode === 'homepage_test'
+          ? 'Homepage test queued'
+          : mode === 'page_test'
+            ? 'Selected page test queued'
+            : 'Full website build queued',
       detail: resumeRun
         ? 'The protected builder will restore the saved source, then Codex will continue the website build.'
-        : 'The protected Codex builder will create a website from the approved Build Manifest.',
+        : mode === 'homepage_test'
+          ? 'The protected builder will create only the homepage for you to review and refine.'
+          : mode === 'page_test'
+            ? 'The protected builder will restore the refined homepage, then create only the selected approved page for review.'
+            : 'The protected builder will create the full website from the approved homepage direction and Build Manifest.',
       tone: 'success',
     });
   }
@@ -6101,6 +6732,41 @@ function WorkspaceApp({
       title: 'Preview cancellation requested',
       detail: 'The builder will stop at its next safe step. Any saved output remains private.',
       tone: 'warning',
+    });
+  }
+
+  async function deleteWebsiteBuild(businessId: string) {
+    await repository.deleteWebsiteBuildHistory(businessId);
+    await refreshData();
+    setNotice({
+      id: crypto.randomUUID(),
+      title: 'Private builds deleted',
+      detail:
+        'All private builds, drafts, screenshots, logs, and preview links were removed. Research and the Build Manifest were kept.',
+      tone: 'success',
+    });
+  }
+
+  async function deleteManagedRecord(kind: ManagedRecordKind, id: string) {
+    await repository.deleteManagedRecord(kind, id);
+    await refreshData();
+    setNotice({
+      id: crypto.randomUUID(),
+      title: 'Saved record deleted',
+      detail: 'The record was permanently removed from this workspace.',
+      tone: 'success',
+    });
+  }
+
+  async function deleteBuildPackage(businessId: string, redesignBriefId: string) {
+    await repository.deleteBuildPackage(businessId, redesignBriefId);
+    await refreshData();
+    setNotice({
+      id: crypto.randomUUID(),
+      title: 'Build package deleted',
+      detail:
+        'The linked brief, Build Manifest, private builds, and saved build output were removed.',
+      tone: 'success',
     });
   }
 
@@ -6167,9 +6833,11 @@ function WorkspaceApp({
           navigate(
             page === 'today'
               ? { page: 'today' }
-              : page === 'settings'
-                ? { page: 'settings' }
-                : { page: 'prospects' },
+              : page === 'data'
+                ? { page: 'data' }
+                : page === 'settings'
+                  ? { page: 'settings' }
+                  : { page: 'prospects' },
           )
         }
         onSignOut={onSignOut}
@@ -6179,6 +6847,20 @@ function WorkspaceApp({
           <TodayPage
             businesses={businesses}
             openWorkspace={openWorkspace}
+            workspaces={workspaces}
+          />
+        ) : route.page === 'data' ? (
+          <DataManagementPage
+            onDeletePackage={deleteBuildPackage}
+            onDeleteRecord={deleteManagedRecord}
+            onOpenWorkspace={(targetWorkspace, tab, versionId) =>
+              navigate({
+                page: 'prospects',
+                businessId: targetWorkspace.business.id,
+                versionId,
+                tab,
+              })
+            }
             workspaces={workspaces}
           />
         ) : route.page === 'settings' ? (
@@ -6193,6 +6875,7 @@ function WorkspaceApp({
             onCreateBuildManifest={createBuildManifest}
             onRequestWebsiteBuild={requestWebsiteBuild}
             onCancelWebsiteBuild={cancelWebsiteBuild}
+            onDeleteWebsiteBuild={deleteWebsiteBuild}
             onCreateBuilderPreviewUrl={createBuilderPreviewUrl}
             onCreateRedesignBrief={createRedesignBrief}
             onRefreshRedesignBriefArchitecture={refreshRedesignBriefArchitecture}
@@ -6207,7 +6890,20 @@ function WorkspaceApp({
             onCancelWebsiteAudit={cancelWebsiteAudit}
             onToggleTask={toggleTask}
             onTabChange={(tab) =>
-              navigate({ page: 'prospects', businessId: workspace.business.id, tab })
+              navigate({
+                page: 'prospects',
+                businessId: workspace.business.id,
+                versionId: route.page === 'prospects' ? route.versionId : undefined,
+                tab,
+              })
+            }
+            onVersionChange={(versionId) =>
+              navigate({
+                page: 'prospects',
+                businessId: workspace.business.id,
+                versionId,
+                tab: 'overview',
+              })
             }
             tab={route.tab ?? 'overview'}
             onUpdateAuditFinding={updateAuditFinding}

@@ -10,6 +10,7 @@ Build a complete, high-quality static business website in `src/` from `../input/
 - Create all required pages as static HTML files in `src/` and use relative links and paths only. The private preview host serves this directory beneath a protected path.
 - Build mobile-first, then provide intentional tablet and desktop layouts. Do not merely shrink a desktop layout.
 - Use semantic landmarks, one logical H1 per page, labelled forms, visible focus styles, accessible contrast, keyboard-friendly navigation, and reduced-motion behaviour.
+- Keep the locked `src/main.js` file and reference it with a local `<script src="main.js"></script>` on every generated page. It provides SiteForge's built-in progressive viewport motion for headings and containers. When captured content presents a factual number as a metric, use `data-counter` when it improves scanning; never invent a metric, add a motion dependency, a remote script, or motion that hides essential content.
 - Use a distinctive, restrained design appropriate to the business. Avoid generic AI visual clutter, fake badges, decorative gradients, unsupported trust claims, and stock-like placeholders.
 - Keep source HTML, CSS, and JavaScript maintainable. Use custom properties as design tokens and reusable component classes where repetition exists.
 - Do not edit `package.json`, `scripts/`, or files outside `src/`. Run `npm run build` before finishing.

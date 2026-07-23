@@ -584,11 +584,11 @@ function sourceCheckpointPayload(currentFiles, initialSourceHashes) {
   };
 }
 
-async function restoreSourceCheckpoint(client, run, sourceDirectory) {
+async function restoreSourceCheckpoint(client, run, sourceDirectory, sourceRun = run) {
   const { data: checkpoints, error: checkpointError } = await client
     .from('builder_artifacts')
     .select('storage_bucket, storage_path, metadata')
-    .eq('builder_run_id', run.id)
+    .eq('builder_run_id', sourceRun.id)
     .eq('kind', 'checkpoint')
     .eq('label', 'Latest private source checkpoint')
     .order('created_at', { ascending: false })
@@ -600,7 +600,7 @@ async function restoreSourceCheckpoint(client, run, sourceDirectory) {
     });
   }
   const checkpoint = checkpoints?.[0];
-  if (!checkpoint) return restoreLegacyDraftFiles(client, run, sourceDirectory);
+  if (!checkpoint) return restoreLegacyDraftFiles(client, sourceRun, sourceDirectory);
 
   const { data: checkpointBlob, error: downloadError } = await client.storage
     .from(checkpoint.storage_bucket || artifactBucket)
@@ -676,7 +676,7 @@ async function restoreSourceCheckpoint(client, run, sourceDirectory) {
   const draftHashes = new Map();
   for (const [path, entry] of expectedFiles) {
     if (entry.source === 'template') continue;
-    const storagePath = `${run.organization_id}/builder-runs/${run.id}/draft/${path}`;
+    const storagePath = `${sourceRun.organization_id}/builder-runs/${sourceRun.id}/draft/${path}`;
     const { data: sourceBlob, error: sourceError } = await client.storage
       .from(artifactBucket)
       .download(storagePath);
@@ -816,6 +816,9 @@ async function saveSourceCheckpoint(client, run, workspace, currentFiles, event)
 
 async function syncDraftFiles(client, run, workspace, event, options = {}) {
   const sourceDirectory = join(workspace.siteDirectory, 'src');
+  const approvedAssetPaths = new Set(
+    workspace.stagedAssets.map((asset) => asset.relativePath.replace(/^src\//, '')),
+  );
   const files = await collectFiles(sourceDirectory).catch(() => []);
   const currentFiles = [];
   for (const file of files) {
@@ -829,9 +832,11 @@ async function syncDraftFiles(client, run, workspace, event, options = {}) {
   if (!workspace.draftPublished && !sourceChanged && !options.force) return false;
   for (const current of currentFiles) {
     const initialHash = workspace.initialSourceHashes.get(current.relativePath);
+    const isApprovedAsset = approvedAssetPaths.has(current.relativePath);
     const needsDraftArtifact =
-      checkpointableSourcePath(current.relativePath) &&
-      (initialHash !== current.hash || workspace.draftHashes.has(current.relativePath));
+      isApprovedAsset ||
+      (checkpointableSourcePath(current.relativePath) &&
+        (initialHash !== current.hash || workspace.draftHashes.has(current.relativePath)));
     if (!needsDraftArtifact) continue;
     if (workspace.draftHashes.get(current.relativePath) === current.hash) continue;
     try {
@@ -902,7 +907,9 @@ async function stageApprovedAssets(client, manifest, siteDirectory) {
 
   const assetsDirectory = join(siteDirectory, 'src', 'assets');
   await mkdir(assetsDirectory, { recursive: true });
+  await chmod(assetsDirectory, 0o755);
   const staged = [];
+  const stagedFileNames = new Set();
   let index = 0;
   for (const asset of assets ?? []) {
     const { data: blob, error: downloadError } = await client.storage
@@ -913,12 +920,21 @@ async function stageApprovedAssets(client, manifest, siteDirectory) {
     }
     index += 1;
     const metadata = recordValue(asset.metadata);
-    const fileName = safeFileName(
+    const baseFileName = safeFileName(
       typeof metadata.originalFileName === 'string'
         ? metadata.originalFileName
         : asset.storage_path,
       `approved-asset-${index}`,
     );
+    const extension = extname(baseFileName);
+    const fileStem = basename(baseFileName, extension);
+    let fileName = baseFileName;
+    let collisionIndex = 2;
+    while (stagedFileNames.has(fileName)) {
+      fileName = `${fileStem}-${collisionIndex}${extension}`;
+      collisionIndex += 1;
+    }
+    stagedFileNames.add(fileName);
     const outputPath = join(assetsDirectory, fileName);
     await writeFile(outputPath, Buffer.from(await blob.arrayBuffer()));
     await chmod(outputPath, 0o444);
@@ -931,11 +947,29 @@ async function stageApprovedAssets(client, manifest, siteDirectory) {
   return staged;
 }
 
-async function stageSelectedPageContent(client, manifest, inputDirectory) {
+async function stageSelectedPageContent(
+  client,
+  manifest,
+  inputDirectory,
+  buildMode,
+  targetSourceUrl,
+) {
   const data = recordValue(manifest.data);
-  const pages = sourcePagePlan(Array.isArray(data.selectedPages) ? data.selectedPages : []);
+  const allPages = sourcePagePlan(Array.isArray(data.selectedPages) ? data.selectedPages : []);
+  const pages =
+    buildMode === 'homepage_test'
+      ? allPages.filter((page) => page.outputPath === 'index.html').slice(0, 1)
+      : buildMode === 'page_test'
+        ? allPages.filter((page) => page.sourceUrl === targetSourceUrl).slice(0, 1)
+        : allPages;
   if (!pages.length) {
-    throw new Error('The approved Build Manifest does not contain any selected source pages.');
+    throw new Error(
+      buildMode === 'homepage_test'
+        ? 'The approved Build Manifest does not contain a homepage source page.'
+        : buildMode === 'page_test'
+          ? 'The selected page is not part of this approved Build Manifest.'
+          : 'The approved Build Manifest does not contain any selected source pages.',
+    );
   }
   const { data: artifacts, error } = await client
     .from('artifacts')
@@ -1031,7 +1065,23 @@ async function prepareWorkspace(client, run, manifest, workerId, diagnostics) {
   const manifestText = JSON.stringify(manifest.data, null, 2);
   await writeFile(manifestPath, manifestText);
   await chmod(manifestPath, 0o444);
-  const stagedSourcePages = await stageSelectedPageContent(client, manifest, inputDirectory);
+  const buildMode =
+    run.build_mode === 'full_site'
+      ? 'full_site'
+      : run.build_mode === 'page_test'
+        ? 'page_test'
+        : 'homepage_test';
+  const targetSourceUrl =
+    typeof run.target_source_url === 'string' && run.target_source_url
+      ? normaliseSourceUrl(run.target_source_url)
+      : undefined;
+  const stagedSourcePages = await stageSelectedPageContent(
+    client,
+    manifest,
+    inputDirectory,
+    buildMode,
+    targetSourceUrl,
+  );
   const stagedAssets = await stageApprovedAssets(client, manifest, siteDirectory);
   await writeFile(
     join(inputDirectory, 'approved-assets.json'),
@@ -1039,10 +1089,32 @@ async function prepareWorkspace(client, run, manifest, workerId, diagnostics) {
   );
   await chmod(join(inputDirectory, 'approved-assets.json'), 0o444);
   const initialSourceHashes = await sourceFileHashes(siteDirectory);
-  const checkpoint = await restoreSourceCheckpoint(client, run, join(siteDirectory, 'src'));
+  let sourceRun = run;
+  if (run.parent_builder_run_id) {
+    const { data: parentRun, error: parentError } = await client
+      .from('builder_runs')
+      .select('id, organization_id')
+      .eq('id', run.parent_builder_run_id)
+      .maybeSingle();
+    if (parentError || !parentRun || parentRun.organization_id !== run.organization_id) {
+      throw new BuilderCheckpointError(
+        'The selected homepage test source is no longer available.',
+        {
+          context: { operation: 'homepage_test_lookup' },
+        },
+      );
+    }
+    sourceRun = parentRun;
+  }
+  const checkpoint = await restoreSourceCheckpoint(
+    client,
+    run,
+    join(siteDirectory, 'src'),
+    sourceRun,
+  );
 
   const lockedFiles = await Promise.all(
-    ['package.json', 'scripts/build.mjs', 'AGENTS.md'].map(async (relativePath) => {
+    ['package.json', 'scripts/build.mjs', 'AGENTS.md', 'src/main.js'].map(async (relativePath) => {
       const path = join(siteDirectory, relativePath);
       const source = await readFile(path);
       await chmod(path, 0o444);
@@ -1067,6 +1139,8 @@ async function prepareWorkspace(client, run, manifest, workerId, diagnostics) {
     lockedFiles,
     stagedAssets,
     stagedSourcePages,
+    buildMode,
+    targetSourceUrl,
     initialSourceHashes,
     draftHashes: checkpoint.draftHashes,
     draftFailures: new Map(),
@@ -1076,6 +1150,7 @@ async function prepareWorkspace(client, run, manifest, workerId, diagnostics) {
     restoredCheckpoint: checkpoint.restored,
     restoredFromLegacyDrafts: checkpoint.restoredFromLegacyDrafts,
     restoredCheckpointFileCount: checkpoint.fileCount ?? 0,
+    restoredHomepageTest: sourceRun.id !== run.id,
   };
 }
 
@@ -1088,22 +1163,38 @@ async function assertLockedFiles(siteDirectory, lockedFiles) {
   }
 }
 
-function buildPrompt(restoredCheckpoint) {
+function buildPrompt(restoredCheckpoint, buildMode, stagedSourcePages) {
+  const homepageTest = buildMode === 'homepage_test';
+  const pageTest = buildMode === 'page_test';
+  const selectedPage = stagedSourcePages[0];
   return [
-    'You are the SiteForge website builder. Build the complete private redesign now.',
+    homepageTest
+      ? 'You are the SiteForge website builder. Build and refine only the private homepage test preview now. Do not create any other public page output.'
+      : pageTest
+        ? `You are the SiteForge website builder. Preserve the refined homepage from the restored private checkpoint and build only the selected page test at ${selectedPage?.outputPath ?? 'the requested output path'}. Do not add or rewrite other public page outputs.`
+        : 'You are the SiteForge website builder. Build the complete private redesign now.',
     'Read ../input/manifest.json, ../input/approved-assets.json, and ../input/source-pages/index.json before writing any website files.',
     'Follow AGENTS.md exactly. The manifest is factual context and a hard boundary, not a loose suggestion.',
-    'Every entry in source-pages/index.json is an explicitly selected source page. Read its linked content file and create the matching outputPath inside src/ for every entry. The compact page plan is not the full page scope and does not permit omitting selected pages.',
+    homepageTest
+      ? 'source-pages/index.json contains the single approved homepage source. Read it and create only its matching index.html output inside src/.'
+      : pageTest
+        ? `source-pages/index.json contains the single approved page selected for this test. Read it and create only its matching ${selectedPage?.outputPath ?? 'output'} inside src/.`
+        : 'Every entry in source-pages/index.json is an explicitly selected source page. Read its linked content file and create the matching outputPath inside src/ for every entry. The compact page plan is not the full page scope and does not permit omitting selected pages.',
     'Add <meta name="siteforge-source-url" content="the exact sourceUrl from the source-page index"> to each generated selected-page HTML file. Keep the outputPath exactly as specified so SiteForge can verify coverage.',
     "Use the captured text, headings, forms, navigation, and content blocks as source material. Rewrite, condense, group, and improve the wording where it helps clarity, scanning, hierarchy, and conversion, but preserve each page's necessary services, operational details, calls to action, forms or tools, legal content, and resource content. Do not silently drop material facts or make captured claims stronger.",
     'Read approvedCapabilities in manifest.json. They are the only approved dynamic scope. This preview is static: for approved managed content, accounts, payments, external integrations, or server-side workflows, build the honest visitor-facing interface and write src/BUILD_NOTES.md explaining the production service, data, and approval boundary. Never fabricate credentials, live submissions, transactions, accounts, or backend behaviour.',
     'Do not invent or imply unsupported business facts. Preserve unresolved items for the human reviewer rather than guessing.',
     'Use only local approved assets in src/assets/. Do not make network requests or add dependencies.',
     'When manifest.json contains a Brand Kit, its primary logo asset is mandatory in the header and footer. Use its reviewed primary and accent colours as brand tokens, then design coherent accessible neutrals, surfaces, and backgrounds yourself; do not copy a weak legacy colour system or replace the identity with a generic one.',
+    'Keep src/main.js and load it with a local <script src="main.js"></script> on every generated page. It is the required built-in motion runtime: it progressively reveals titles and content containers as they enter the viewport, and supports intentional number counters marked with data-counter. When captured content includes a factual metric, add data-counter when that supports scanning; never invent a number just to animate it. Do not add a motion library or remote scripts, and preserve reduced-motion behaviour.',
     restoredCheckpoint
       ? 'A private source checkpoint has been restored into src/. Inspect and preserve the useful existing work, but extend or correct it until it covers every selected source-page outputPath.'
       : 'Start from the locked builder template in src/.',
-    'Finish by running npm run build. Briefly report the completed page count, selected source pages mapped to output paths, and any unresolved manifest questions.',
+    homepageTest
+      ? 'Finish by running npm run build. Briefly report the completed homepage and any unresolved manifest questions.'
+      : pageTest
+        ? `Finish by running npm run build. Briefly report the completed ${selectedPage?.outputPath ?? 'selected page'} test and any unresolved manifest questions.`
+        : 'Finish by running npm run build. Briefly report the completed page count, selected source pages mapped to output paths, and any unresolved manifest questions.',
   ].join('\n');
 }
 
@@ -1141,6 +1232,21 @@ function brandProblems(manifest, stagedAssets, allFiles) {
     }
     return problems;
   });
+}
+
+function motionRuntimeProblems(htmlFiles, allFiles) {
+  const problems = [];
+  if (!allFiles.some((file) => basename(file) === 'main.js')) {
+    problems.push(
+      'The required local motion runtime main.js is missing from the generated preview.',
+    );
+  }
+  for (const file of htmlFiles) {
+    if (!/<script\b[^>]*\bsrc=["'][^"']*main\.js(?:["'][^>]*)?>/i.test(file.contents)) {
+      problems.push(`${file.relativePath} does not load the required local motion runtime.`);
+    }
+  }
+  return problems;
 }
 
 async function runCodex(client, run, workerId, workspace, apiKey, eventWriter, diagnostics) {
@@ -1189,7 +1295,9 @@ async function runCodex(client, run, workerId, workspace, apiKey, eventWriter, d
     outputPath,
   ];
   if (model) codexArguments.push('--model', model);
-  codexArguments.push(buildPrompt(workspace.restoredCheckpoint));
+  codexArguments.push(
+    buildPrompt(workspace.restoredCheckpoint, workspace.buildMode, workspace.stagedSourcePages),
+  );
   const child = spawn(codexBinary, codexArguments, {
     cwd: workspace.siteDirectory,
     env: {
@@ -1444,15 +1552,21 @@ function sourceUrlMarker(html) {
   return undefined;
 }
 
-function selectedPageCoverageCheck(manifest, htmlFiles) {
+function selectedPageCoverageCheck(manifest, htmlFiles, buildMode, targetSourceUrl) {
   const selectedPages = sourcePagePlan(
     Array.isArray(recordValue(manifest.data).selectedPages)
       ? recordValue(manifest.data).selectedPages
       : [],
   );
+  const scopedPages =
+    buildMode === 'homepage_test'
+      ? selectedPages.filter((page) => page.outputPath === 'index.html').slice(0, 1)
+      : buildMode === 'page_test'
+        ? selectedPages.filter((page) => page.sourceUrl === targetSourceUrl).slice(0, 1)
+        : selectedPages;
   const generatedByPath = new Map(htmlFiles.map((file) => [file.relativePath, file]));
   const problems = [];
-  for (const page of selectedPages) {
+  for (const page of scopedPages) {
     const output = generatedByPath.get(page.outputPath);
     if (!output) {
       problems.push(`${page.outputPath} is missing for selected source ${page.sourceUrl}.`);
@@ -1471,7 +1585,7 @@ function selectedPageCoverageCheck(manifest, htmlFiles) {
       problems.push(`${page.outputPath} has an invalid selected-source provenance marker.`);
     }
   }
-  return { expectedPageCount: selectedPages.length, problems };
+  return { expectedPageCount: scopedPages.length, problems };
 }
 
 function previewUrlForPage(serverUrl, relativePath) {
@@ -1501,11 +1615,25 @@ async function runQualityChecks(
         contents: await readFile(file, 'utf8'),
       })),
   );
-  const totalPreviewCaptures = htmlFiles.length * previewViewports.length;
+  const scopedHtmlFiles =
+    workspace.buildMode === 'homepage_test'
+      ? htmlFiles.filter((file) => file.relativePath === 'index.html')
+      : workspace.buildMode === 'page_test'
+        ? htmlFiles.filter(
+            (file) => file.relativePath === workspace.stagedSourcePages[0]?.outputPath,
+          )
+        : htmlFiles;
+  const totalPreviewCaptures = scopedHtmlFiles.length * previewViewports.length;
   const totalItems = 5 + totalPreviewCaptures;
-  const structuralProblems = structuralCheck(htmlFiles);
-  const selectedPageCoverage = selectedPageCoverageCheck(manifest, htmlFiles);
+  const structuralProblems = structuralCheck(scopedHtmlFiles);
+  const selectedPageCoverage = selectedPageCoverageCheck(
+    manifest,
+    scopedHtmlFiles,
+    workspace.buildMode,
+    workspace.targetSourceUrl,
+  );
   const brandCheckProblems = await brandProblems(manifest, workspace.stagedAssets, allFiles);
+  const motionProblems = motionRuntimeProblems(scopedHtmlFiles, allFiles);
   const checks = [
     {
       id: 'static-structure',
@@ -1513,7 +1641,7 @@ async function runQualityChecks(
       status: structuralProblems.length ? 'failed' : 'passed',
       detail: structuralProblems.length
         ? structuralProblems.join(' ')
-        : `${htmlFiles.length} page${htmlFiles.length === 1 ? '' : 's'} include a title, main landmark, and H1.`,
+        : `${scopedHtmlFiles.length} page${scopedHtmlFiles.length === 1 ? '' : 's'} include a title, main landmark, and H1.`,
     },
     {
       id: 'brand-kit-usage',
@@ -1522,6 +1650,14 @@ async function runQualityChecks(
       detail: brandCheckProblems.length
         ? brandCheckProblems.join(' ')
         : 'No approved Brand Kit was required, or its primary logo and reviewed palette are present.',
+    },
+    {
+      id: 'motion-runtime',
+      label: 'Built-in motion runtime',
+      status: motionProblems.length ? 'failed' : 'passed',
+      detail: motionProblems.length
+        ? motionProblems.join(' ')
+        : 'Every generated page loads the local viewport-motion runtime with reduced-motion support.',
     },
     {
       id: 'selected-page-coverage',
@@ -1534,13 +1670,13 @@ async function runQualityChecks(
   ];
   await updateProgress(client, run, workerId, {
     progress_phase: 'quality_checks',
-    progress_detail: `Checking ${htmlFiles.length} generated page${htmlFiles.length === 1 ? '' : 's'} in a private browser.`,
+    progress_detail: `Checking ${scopedHtmlFiles.length} generated page${scopedHtmlFiles.length === 1 ? '' : 's'} in a private browser.`,
     total_items: totalItems,
     completed_items: 4,
   });
   await eventWriter(
     'quality',
-    `Browser checks started for ${htmlFiles.length} generated page${htmlFiles.length === 1 ? '' : 's'}.`,
+    `Browser checks started for ${scopedHtmlFiles.length} generated page${scopedHtmlFiles.length === 1 ? '' : 's'}.`,
   );
   let previewServer;
   try {
@@ -1558,7 +1694,7 @@ async function runQualityChecks(
   await diagnostics.record({
     scope: 'browser_quality',
     title: 'Private preview server started',
-    metadata: { generatedPageCount: htmlFiles.length },
+    metadata: { generatedPageCount: scopedHtmlFiles.length },
   });
   const screenshotArtifacts = [];
   const axeViolations = [];
@@ -1582,7 +1718,7 @@ async function runQualityChecks(
     });
     try {
       let completedCaptures = 0;
-      for (const htmlFile of htmlFiles) {
+      for (const htmlFile of scopedHtmlFiles) {
         for (const viewport of previewViewports) {
           await assertBuildActive(client, run, workerId);
           await updateProgress(client, run, workerId, {
@@ -1719,7 +1855,7 @@ async function runQualityChecks(
     status: uniqueViolationIds.length ? 'needs_review' : 'passed',
     detail: uniqueViolationIds.length
       ? `${uniqueViolationIds.length} axe rule${uniqueViolationIds.length === 1 ? '' : 's'} need review: ${uniqueViolationIds.join(', ')}.`
-      : `No automated axe violations were detected across ${htmlFiles.length} generated page${htmlFiles.length === 1 ? '' : 's'} at desktop and mobile widths.`,
+      : `No automated axe violations were detected across ${scopedHtmlFiles.length} generated page${scopedHtmlFiles.length === 1 ? '' : 's'} at desktop and mobile widths.`,
     metadata: {
       violationIds: uniqueViolationIds,
       violations: axeViolations,

@@ -8,6 +8,7 @@ import type {
   AuditFinding,
   BuildManifest,
   BuilderPreviewMode,
+  BuilderRunMode,
   BuilderRun,
   CapturedPage,
   Business,
@@ -72,9 +73,20 @@ export type WorkspaceRepository = {
   ): Promise<void>;
   approveRedesignBrief(brief: RedesignBrief): Promise<void>;
   createBuildManifest(businessId: string): Promise<BuildManifest | undefined>;
-  requestWebsiteBuild(businessId: string): Promise<BuilderRun | undefined>;
+  requestWebsiteBuild(
+    businessId: string,
+    mode?: BuilderRunMode,
+    targetSourceUrl?: string,
+  ): Promise<BuilderRun | undefined>;
   resumeWebsiteBuild(builderRunId: string): Promise<BuilderRun | undefined>;
   cancelWebsiteBuild(businessId: string): Promise<void>;
+  deleteWebsiteBuild(builderRunId: string): Promise<void>;
+  deleteWebsiteBuildHistory(businessId: string): Promise<void>;
+  deleteManagedRecord(
+    kind: 'capture' | 'asset_analysis' | 'brief' | 'manifest' | 'build',
+    id: string,
+  ): Promise<void>;
+  deleteBuildPackage(businessId: string, redesignBriefId: string): Promise<void>;
   createBuilderPreviewUrl(builderRunId: string, mode?: BuilderPreviewMode): Promise<string>;
   setTaskState(task: Task, state: Task['state']): Promise<void>;
   approveForOutreach(businessId: string): Promise<boolean>;
@@ -236,6 +248,14 @@ export class SiteforgeRepository {
     );
     const completed = transactionResult(transaction);
     entries.forEach(([storeName, record]) => transaction.objectStore(storeName).put(record));
+    await completed;
+  }
+
+  private async deleteRecord(storeName: StoreName, id: string) {
+    const database = await this.database();
+    const transaction = database.transaction(storeName, 'readwrite');
+    const completed = transactionResult(transaction);
+    transaction.objectStore(storeName).delete(id);
     await completed;
   }
 
@@ -409,6 +429,7 @@ export class SiteforgeRepository {
     return {
       business,
       website: websites[0],
+      captures: orderedCaptures,
       contacts,
       facts:
         latestCapture?.status === 'ready'
@@ -422,6 +443,7 @@ export class SiteforgeRepository {
         ? artifacts.filter((artifact) => artifact.crawlRunId === latestCapture.id)
         : [],
       assetAnnotations: [],
+      assetAnalysisJobs: [],
       brandColourEvidence: [],
       previousCapture,
       previousFacts: previousCapture
@@ -432,11 +454,16 @@ export class SiteforgeRepository {
         : [],
       audit: audits[0],
       redesignBrief: briefs.sort((left, right) => right.version - left.version)[0],
+      redesignBriefs: briefs.sort((left, right) => right.version - left.version),
       buildManifest: buildManifests.sort((left, right) =>
         right.generatedAt.localeCompare(left.generatedAt),
       )[0],
+      buildManifests: buildManifests.sort((left, right) =>
+        right.generatedAt.localeCompare(left.generatedAt),
+      ),
       builderArtifacts: [],
       builderEvents: [],
+      builderRuns: [],
       concept: concepts[0],
       report: reports[0],
       tasks: tasks.sort((left, right) => left.state.localeCompare(right.state)),
@@ -1006,6 +1033,42 @@ export class SiteforgeRepository {
 
   async cancelWebsiteBuild(): Promise<void> {
     throw new Error('Private preview builds require the protected Supabase builder worker.');
+  }
+
+  async deleteWebsiteBuild(): Promise<void> {
+    throw new Error('Private preview builds require the protected Supabase builder worker.');
+  }
+
+  async deleteWebsiteBuildHistory(): Promise<void> {
+    throw new Error('Private preview builds require the protected Supabase builder worker.');
+  }
+
+  async deleteManagedRecord(
+    kind: 'capture' | 'asset_analysis' | 'brief' | 'manifest' | 'build',
+    id: string,
+  ) {
+    if (kind === 'capture') return this.deleteRecord('crawlRuns', id);
+    if (kind === 'brief') return this.deleteRecord('briefs', id);
+    if (kind === 'manifest') return this.deleteRecord('buildManifests', id);
+    if (kind === 'asset_analysis' || kind === 'build') return;
+  }
+
+  async deleteBuildPackage(businessId: string, redesignBriefId: string) {
+    const database = await this.database();
+    const readTransaction = database.transaction('buildManifests', 'readonly');
+    const manifests = await requestResult(
+      readTransaction.objectStore('buildManifests').index('businessId').getAll(businessId),
+    );
+    const transaction = database.transaction(['briefs', 'buildManifests'], 'readwrite');
+    const manifestStore = transaction.objectStore('buildManifests');
+    const completed = transactionResult(transaction);
+    for (const item of manifests) {
+      if (item.redesignBriefId === redesignBriefId) {
+        manifestStore.delete(item.id);
+      }
+    }
+    transaction.objectStore('briefs').delete(redesignBriefId);
+    await completed;
   }
 
   async createBuilderPreviewUrl(): Promise<string> {
